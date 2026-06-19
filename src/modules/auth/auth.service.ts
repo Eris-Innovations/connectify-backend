@@ -8,13 +8,14 @@ import { redis } from '../../config/redis';
 import { UserModel } from '../users/user.model';
 import { OtpModel } from './otp.model';
 import { RefreshTokenModel } from './refresh-token.model';
+import { normalizePhone } from '../../lib/phone';
 
 type RegisterInput = {
   name: string;
   username: string;
   email: string;
   password: string;
-  phone?: string;
+  phone: string;
 };
 
 type LoginInput = {
@@ -84,23 +85,38 @@ async function revokeRefreshTokenInRedis(token: string) {
 }
 
 export async function registerUser(input: RegisterInput) {
+  const normalizedPhone = normalizePhone(input.phone ?? '');
+  if (!normalizedPhone) {
+    return {
+      status: StatusCodes.BAD_REQUEST,
+      body: { success: false, message: 'Enter a valid phone number with country code (e.g. +923001234567).' }
+    };
+  }
+
+  const emailLower = input.email.toLowerCase();
+  const usernameLower = input.username.toLowerCase();
+
   const existing = await UserModel.findOne({
-    $or: [{ email: input.email.toLowerCase() }, { username: input.username.toLowerCase() }]
+    $or: [{ email: emailLower }, { username: usernameLower }, { phone: normalizedPhone }]
   }).lean();
 
   if (existing) {
+    let message = 'Email or username already exists';
+    if (existing.phone === normalizedPhone) message = 'This phone number is already registered';
+    else if (existing.email === emailLower) message = 'This email is already registered';
+    else if (existing.username === usernameLower) message = 'This username is already taken';
     return {
       status: StatusCodes.CONFLICT,
-      body: { success: false, message: 'Email or username already exists' }
+      body: { success: false, message }
     };
   }
 
   const passwordHash = await bcrypt.hash(input.password, 12);
   const user = await UserModel.create({
     name: input.name,
-    username: input.username.toLowerCase(),
-    email: input.email.toLowerCase(),
-    phone: input.phone,
+    username: usernameLower,
+    email: emailLower,
+    phone: normalizedPhone,
     passwordHash,
     // Signup already collects a unique username; skip duplicate “choose username” onboarding.
     hasCompletedProfile: true

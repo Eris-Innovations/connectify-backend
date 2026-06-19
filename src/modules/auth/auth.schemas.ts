@@ -1,4 +1,11 @@
 import { z } from 'zod';
+import { normalizePhone } from '../../lib/phone';
+
+const phoneField = z
+  .string()
+  .min(8, 'Phone number is too short')
+  .max(24, 'Phone number is too long')
+  .refine((v) => normalizePhone(v) !== null, { message: 'Enter a valid phone number with country code' });
 
 export const registerSchema = z.object({
   body: z.object({
@@ -6,7 +13,7 @@ export const registerSchema = z.object({
     username: z.string().min(3).max(24).regex(/^[a-zA-Z0-9_.]+$/),
     email: z.string().email(),
     password: z.string().min(8),
-    phone: z.string().optional()
+    phone: phoneField
   })
 });
 

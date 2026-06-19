@@ -6,7 +6,7 @@ export function dmVirtualId(userIdA: string, userIdB: string): string {
   return `dm:${sorted[0]}:${sorted[1]}`;
 }
 
-/** Resolve mobile virtual `dm:a:b` to Mongo conversation id (create DM if missing). */
+/** Resolve client conversation id to Mongo id. Does not create missing DMs. */
 export async function resolveVirtualConversationId(input: string): Promise<string> {
   if (!input.startsWith('dm:')) return input;
   const parts = input.split(':');
@@ -19,18 +19,9 @@ export async function resolveVirtualConversationId(input: string): Promise<strin
     'participants.userId': { $all: [u1, u2] }
   })
     .sort({ lastActivityAt: -1, _id: -1 })
-    .exec();
+    .select('_id')
+    .lean();
 
   if (existing) return String(existing._id);
-
-  const created = await ConversationModel.create({
-    type: 'dm',
-    participants: [
-      { userId: u1, role: 'member' },
-      { userId: u2, role: 'member' }
-    ],
-    createdBy: u1,
-    lastActivityAt: new Date()
-  });
-  return String(created._id);
+  return input;
 }

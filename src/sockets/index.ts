@@ -8,8 +8,11 @@ import { ConversationModel } from '../modules/messages/conversation.model';
 import { MessageModel } from '../modules/messages/message.model';
 import { UserModel } from '../modules/users/user.model';
 import { resolveConversationForMember } from '../lib/conversationAccess';
+import { getDmPeerUserId } from '../lib/dmConversation';
+import { areFriends } from '../modules/friends/friends.service';
 import { scheduleVoiceMessageTranscription } from '../modules/ai/whisper.service';
 import { resolveStoredMediaUrl } from '../lib/r2';
+import { setSocketIo } from './io';
 
 type SocketAuthPayload = {
   userId: string;
@@ -22,6 +25,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
       credentials: true
     }
   });
+  setSocketIo(io);
 
   io.use((socket, next) => {
     try {
@@ -218,6 +222,14 @@ export function createSocketServer(httpServer: HttpServer): Server {
 
         const dbConversationId = await resolveConversationForMember(senderId, rawConv);
         if (!dbConversationId) return;
+
+        const convMeta = await ConversationModel.findById(dbConversationId).select('type').lean();
+        if (convMeta?.type === 'dm') {
+          const peerId = await getDmPeerUserId(dbConversationId, senderId);
+          if (!peerId || !(await areFriends(senderId, peerId))) {
+            return;
+          }
+        }
 
         const created = await MessageModel.create({
           conversationId: dbConversationId,

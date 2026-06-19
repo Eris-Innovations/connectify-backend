@@ -84,6 +84,7 @@ export async function getPublicUserController(req: AuthedRequest, res: Response)
       id: String(user._id),
       username: user.username,
       name: user.name,
+      phone: user.phone ?? '',
       bio: user.bio,
       avatar,
       hasCompletedProfile: user.hasCompletedProfile

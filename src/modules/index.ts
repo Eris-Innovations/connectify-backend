@@ -25,6 +25,10 @@ import { adminRouter } from './admin/admin.routes';
 import { aiAgentRouter } from './ai/agent.routes';
 import { mediaRouter } from './media/media.routes';
 import { resolveStoredMediaUrl } from '../lib/r2';
+import { normalizePhone, phoneSearchPatterns } from '../lib/phone';
+import { findDmMongoId, ensureDmConversation } from '../lib/dmConversation';
+import { friendsRouter } from './friends/friends.routes';
+import { areFriends } from './friends/friends.service';
 
 export const apiRouter = Router();
 
@@ -41,6 +45,7 @@ apiRouter.use(paymentsRouter);
 apiRouter.use(complianceRouter);
 apiRouter.use(adminRouter);
 apiRouter.use(aiAgentRouter);
+apiRouter.use('/friends', friendsRouter);
 
 // Chats & messages
 apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
@@ -137,16 +142,25 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
       const bTime = b.lastMessageTime ? new Date(b.lastMessageTime).getTime() : 0;
       return bTime - aTime;
     });
+
+    const visibleChats = [];
+    for (const row of formatted) {
+      if (row.peerUserId && !(await areFriends(userId, row.peerUserId))) {
+        continue;
+      }
+      visibleChats.push(row);
+    }
+
     console.log(
       '[chats] response avatar snapshot',
-      formatted.slice(0, 10).map((c: any) => ({
+      visibleChats.slice(0, 10).map((c: any) => ({
         id: c.id,
         name: c.name,
         avatar: c.avatar ? String(c.avatar).slice(0, 120) : ''
       }))
     );
 
-    return res.json({ success: true, data: formatted });
+    return res.json({ success: true, data: visibleChats });
   } catch (error) {
     console.error('Failed to fetch chats', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
@@ -158,6 +172,17 @@ apiRouter.post('/chats', requireAuth, async (req: AuthedRequest, res) => {
   if (!targetUserId) return res.status(400).json({ success: false, message: 'targetUserId required' });
   if (!Types.ObjectId.isValid(String(targetUserId))) {
     return res.status(400).json({ success: false, message: 'Invalid targetUserId' });
+  }
+  if (String(targetUserId) === req.auth!.userId) {
+    return res.status(400).json({ success: false, message: 'Cannot chat with yourself' });
+  }
+
+  const friends = await areFriends(req.auth!.userId, String(targetUserId));
+  if (!friends) {
+    return res.status(403).json({
+      success: false,
+      message: 'You must be friends before starting a chat. Send a friend request first.'
+    });
   }
 
   const virtualId = dmVirtualId(req.auth!.userId, targetUserId);
@@ -176,17 +201,8 @@ apiRouter.post('/chats', requireAuth, async (req: AuthedRequest, res) => {
     return res.json({ success: true, data: { id: virtualId, mongoId: String(existing._id) } });
   }
 
-  const created = await ConversationModel.create({
-    type: 'dm',
-    participants: [
-      { userId: req.auth!.userId, role: 'member' },
-      { userId: targetUserId, role: 'member' }
-    ],
-    isSecret: Boolean(isSecret),
-    createdBy: req.auth!.userId
-  });
-
-  return res.json({ success: true, data: { id: virtualId, mongoId: String(created._id) } });
+  const mongoId = await ensureDmConversation(req.auth!.userId, String(targetUserId), req.auth!.userId);
+  return res.json({ success: true, data: { id: virtualId, mongoId } });
 });
 
 apiRouter.delete('/chats/:id', requireAuth, async (req: AuthedRequest, res) => {
@@ -270,8 +286,25 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
     if (!paramId) {
       return res.status(400).json({ success: false, message: 'Conversation id required' });
     }
-    const mongoConvId = await resolveVirtualConversationId(paramId);
-    const conv = await ConversationModel.findById(mongoConvId).select('participants').lean();
+    const pair = parseDmVirtualUserPair(paramId);
+    let mongoConvId: string;
+    if (pair) {
+      const found = await findDmMongoId(pair.a, pair.b);
+      if (!found) {
+        return res.status(404).json({ success: false, message: 'Conversation not found' });
+      }
+      if (!(await areFriends(pair.a, pair.b))) {
+        return res.status(403).json({
+          success: false,
+          message: 'Accept the friend request to start chatting.'
+        });
+      }
+      mongoConvId = found;
+    } else {
+      mongoConvId = paramId;
+    }
+
+    const conv = await ConversationModel.findById(mongoConvId).select('participants type').lean();
     if (!conv) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
@@ -500,15 +533,26 @@ apiRouter.get('/search', requireAuth, async (req, res) => {
   const type = typeof req.query.type === 'string' ? req.query.type : 'all';
 
   const literal = q ? escapeMongoRegex(q) : '';
-  const query = literal
-    ? {
-        $or: [
-          { name: { $regex: literal, $options: 'i' } },
-          { username: { $regex: literal, $options: 'i' } },
-          { bio: { $regex: literal, $options: 'i' } }
-        ]
-      }
-    : {};
+  const orConditions: Record<string, unknown>[] = [];
+
+  if (literal) {
+    orConditions.push(
+      { name: { $regex: literal, $options: 'i' } },
+      { username: { $regex: literal, $options: 'i' } },
+      { bio: { $regex: literal, $options: 'i' } }
+    );
+
+    for (const pattern of phoneSearchPatterns(qInput)) {
+      orConditions.push({ phone: { $regex: escapeMongoRegex(pattern) } });
+    }
+
+    const exactPhone = normalizePhone(qInput);
+    if (exactPhone) {
+      orConditions.push({ phone: exactPhone });
+    }
+  }
+
+  const query = orConditions.length ? { $or: orConditions } : {};
 
   const users = type === 'channels' ? [] : await UserModel.find(query).limit(20).lean();
   const channels =
@@ -518,6 +562,7 @@ apiRouter.get('/search', requireAuth, async (req, res) => {
       id: String(u._id),
       name: u.name,
       username: u.username,
+      phone: u.phone ?? '',
       avatarUrl: u.avatar ? await resolveStoredMediaUrl(u.avatar) : ''
     }))
   );
