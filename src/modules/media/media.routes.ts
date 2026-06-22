@@ -6,7 +6,7 @@ import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { requireAuth, type AuthedRequest } from '../../middleware/auth';
 import { env } from '../../config/env';
 import { isR2S3CompatibleAccessKeyId, R2_S3_CREDENTIALS_HELP } from '../../config/r2Credentials';
-import { buildPublicUrl, getR2Client, hasR2Config } from '../../lib/r2';
+import { buildPublicUrl, getR2Client, hasR2Config, presignGetUrl } from '../../lib/r2';
 
 export const mediaRouter = Router();
 
@@ -97,10 +97,14 @@ mediaRouter.post('/media/upload', requireAuth, upload.single('file'), async (req
     return res.status(502).json({ success: false, message: 'Storage upload failed. Try again later.' });
   }
 
+  const url = buildPublicUrl(key);
+  const accessUrl = await presignGetUrl(url);
+
   return res.status(201).json({
     success: true,
     data: {
-      url: buildPublicUrl(key),
+      url,
+      accessUrl,
       key,
       mimeType: file.mimetype,
       size: file.size

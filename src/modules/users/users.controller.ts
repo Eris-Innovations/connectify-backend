@@ -129,3 +129,16 @@ export async function completeProfileController(req: AuthedRequest, res: Respons
     }
   });
 }
+
+export async function registerPushTokenController(req: AuthedRequest, res: Response) {
+  const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  if (!token.startsWith('ExponentPushToken[')) {
+    return res.status(StatusCodes.BAD_REQUEST).json({ success: false, message: 'Invalid Expo push token' });
+  }
+
+  await UserModel.findByIdAndUpdate(req.auth!.userId, {
+    $addToSet: { expoPushTokens: token },
+  });
+
+  return res.status(StatusCodes.OK).json({ success: true });
+}

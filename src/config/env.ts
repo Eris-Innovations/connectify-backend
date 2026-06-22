@@ -68,7 +68,9 @@ const envSchema = z.object({
   /** Resend API key for transactional email (password reset). */
   RESEND_API_KEY: optionalTrimmed('RESEND_API_KEY'),
   /** Sender on a domain verified in Resend, e.g. `Connectify <noreply@yourdomain.com>` (required with RESEND_API_KEY). */
-  EMAIL_FROM: optionalTrimmedLoose()
+  EMAIL_FROM: optionalTrimmedLoose(),
+  /** Optional Expo access token for higher push rate limits (EAS project). */
+  EXPO_ACCESS_TOKEN: optionalTrimmed('EXPO_ACCESS_TOKEN')
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -1,4 +1,5 @@
 import type { Server as HttpServer } from 'http';
+import { Types } from 'mongoose';
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env';
@@ -12,6 +13,14 @@ import { getDmPeerUserId } from '../lib/dmConversation';
 import { areFriends } from '../modules/friends/friends.service';
 import { scheduleVoiceMessageTranscription } from '../modules/ai/whisper.service';
 import { resolveStoredMediaUrl } from '../lib/r2';
+import { sendIncomingCallPush } from '../lib/expoPush';
+import { clearPendingCall, clearPendingCallByCaller, getPendingCall, storePendingCall } from '../modules/calls/pending-call.service';
+import {
+  clearActiveCall,
+  clearActiveCallPair,
+  getActiveCall,
+  setActiveCall,
+} from '../modules/calls/active-call.service';
 import { setSocketIo } from './io';
 
 type SocketAuthPayload = {
@@ -168,6 +177,23 @@ export function createSocketServer(httpServer: HttpServer): Server {
       } catch {
         // Ignore
       }
+
+      const cancelledCall = await clearPendingCallByCaller(userId);
+      if (cancelledCall) {
+        io.to(`user:${cancelledCall.receiverId}`).emit('call:ended', {
+          callId: cancelledCall.record.callId,
+          reason: 'unavailable',
+        });
+      }
+
+      const activeCall = await clearActiveCall(userId);
+      if (activeCall?.otherUserId) {
+        io.to(`user:${activeCall.otherUserId}`).emit('call:ended', {
+          callId: activeCall.callId,
+          reason: 'unavailable',
+        });
+        await clearActiveCall(activeCall.otherUserId);
+      }
     });
 
     socket.on('chat:join', async (conversationId: string) => {
@@ -284,6 +310,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
             }
           : { id: senderId, name: 'User', username: '', avatarUrl: '' };
 
+        const playableMediaUrl = mediaUrl ? await resolveStoredMediaUrl(mediaUrl) : '';
         const serverPayload = {
           conversationId: rawConv,
           messageId: String(created._id),
@@ -291,7 +318,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
           content: text,
           media: mediaUrl
             ? {
-                uri: mediaUrl,
+                uri: playableMediaUrl,
                 type: mediaType,
                 durationSec: metadata.durationSec,
                 name: metadata.name,
@@ -432,28 +459,162 @@ export function createSocketServer(httpServer: HttpServer): Server {
       });
     });
 
-    socket.on('call:initiate', (payload: { to: string; callerName?: string; offer: unknown }) => {
-      io.to(`user:${payload.to}`).emit('call:invitation', {
-        fromId: socket.data.userId,
-        fromName: payload.callerName ?? 'Unknown',
-        offer: payload.offer
-      });
+    socket.on('call:initiate', async (payload: { to: string; callerName?: string; offer: unknown }) => {
+      try {
+        const callerId = socket.data.userId as string;
+        const receiverId = typeof payload.to === 'string' ? payload.to.trim() : '';
+        if (!receiverId || !Types.ObjectId.isValid(receiverId)) {
+          socket.emit('call:rejected', { reason: 'invalid_target' });
+          return;
+        }
+        if (receiverId === callerId) {
+          socket.emit('call:rejected', { reason: 'invalid_target' });
+          return;
+        }
+        if (!(await areFriends(callerId, receiverId))) {
+          socket.emit('call:rejected', { reason: 'not_friends' });
+          return;
+        }
+
+        const offerSdp =
+          payload.offer && typeof payload.offer === 'object' && typeof (payload.offer as { sdp?: unknown }).sdp === 'string'
+            ? (payload.offer as { sdp: string }).sdp
+            : '';
+        if (!offerSdp.trim()) {
+          socket.emit('call:failed', { reason: 'invalid_offer' });
+          return;
+        }
+        const isVideo = offerSdp.includes('m=video');
+
+        const existing = await getPendingCall(receiverId);
+        if (existing) {
+          socket.emit('call:busy', { callId: existing.callId });
+          return;
+        }
+
+        const receiverActive = await getActiveCall(receiverId);
+        if (receiverActive) {
+          socket.emit('call:busy', { callId: receiverActive.callId });
+          return;
+        }
+
+        const callerActive = await getActiveCall(callerId);
+        if (callerActive) {
+          socket.emit('call:busy', { callId: callerActive.callId });
+          return;
+        }
+
+        const { record: pending, stored } = await storePendingCall(receiverId, {
+          callerId,
+          callerName: payload.callerName ?? 'Unknown',
+          isVideo,
+          offer: payload.offer,
+        });
+        if (!stored) {
+          socket.emit('call:failed', { reason: 'storage_unavailable' });
+          return;
+        }
+
+        const socketsInRoom = io.sockets.adapter.rooms.get(`user:${receiverId}`)?.size ?? 0;
+        console.log('[call:initiate]', {
+          callerId,
+          receiverId,
+          callId: pending.callId,
+          room: `user:${receiverId}`,
+          socketsInRoom,
+        });
+
+        io.to(`user:${receiverId}`).emit('call:invitation', {
+          callId: pending.callId,
+          fromId: callerId,
+          fromName: payload.callerName ?? 'Unknown',
+          offer: payload.offer,
+          isVideo,
+        });
+
+        socket.emit('call:ringing', { callId: pending.callId, receiverId });
+
+        if (socketsInRoom > 0) {
+          return;
+        }
+
+        try {
+          const callee = await UserModel.findById(receiverId).select('expoPushTokens settings').lean();
+          const tokens = Array.isArray(callee?.expoPushTokens)
+            ? callee!.expoPushTokens.filter((t): t is string => typeof t === 'string' && t.startsWith('ExponentPushToken['))
+            : [];
+          const notificationsEnabled = callee?.settings?.notificationsEnabled !== false;
+          if (notificationsEnabled && tokens.length > 0) {
+            await sendIncomingCallPush(tokens, {
+              callId: pending.callId,
+              callerId,
+              callerName: payload.callerName ?? 'Unknown',
+              isVideo,
+            });
+          } else if (tokens.length === 0) {
+            console.warn('[call:initiate] no push tokens for receiver', receiverId);
+          }
+        } catch (err) {
+          console.warn('[call:initiate] push failed', err);
+        }
+      } catch (error) {
+        console.error('[call:initiate] failed', error);
+        socket.emit('call:failed', { reason: 'internal' });
+      }
     });
 
-    socket.on('call:accept', (payload: { to: string; answer: unknown }) => {
-      io.to(`user:${payload.to}`).emit('call:accepted', {
-        answer: payload.answer
-      });
+    socket.on('call:accept', async (payload: { to: string; answer: unknown; callId?: string }) => {
+      try {
+        const accepterId = socket.data.userId as string;
+        const callerId = typeof payload.to === 'string' ? payload.to.trim() : '';
+        if (!callerId) {
+          socket.emit('call:error', { code: 'invalid_target' });
+          return;
+        }
+
+        const pending = await getPendingCall(accepterId);
+        if (!pending || pending.callerId !== callerId) {
+          socket.emit('call:error', { code: 'no_pending_call' });
+          return;
+        }
+        if (payload.callId && payload.callId !== pending.callId) {
+          socket.emit('call:error', { code: 'call_id_mismatch' });
+          return;
+        }
+
+        await clearPendingCall(accepterId);
+        await setActiveCall(accepterId, pending.callId, callerId);
+        await setActiveCall(callerId, pending.callId, accepterId);
+        io.to(`user:${callerId}`).emit('call:accepted', {
+          answer: payload.answer,
+          callId: pending.callId,
+        });
+      } catch (error) {
+        console.error('[call:accept] failed', error);
+        socket.emit('call:error', { code: 'internal' });
+      }
     });
 
     socket.on('ice-candidate', (payload: { to: string; candidate: unknown }) => {
-      io.to(`user:${payload.to}`).emit('ice-candidate', {
-        candidate: payload.candidate
+      const targetId = typeof payload.to === 'string' ? payload.to.trim() : '';
+      if (!targetId || !payload.candidate) return;
+      io.to(`user:${targetId}`).emit('ice-candidate', {
+        candidate: payload.candidate,
       });
     });
 
-    socket.on('call:end', (payload: { to: string }) => {
-      io.to(`user:${payload.to}`).emit('call:ended');
+    socket.on('call:end', async (payload: { to: string; reason?: string; callId?: string }) => {
+      const me = socket.data.userId as string;
+      const other = typeof payload.to === 'string' ? payload.to.trim() : '';
+      const cleared = await clearPendingCall(me);
+      if (other) await clearPendingCall(other);
+      await clearActiveCallPair(me, other);
+      if (other) {
+        io.to(`user:${other}`).emit('call:ended', {
+          reason: payload.reason ?? 'ended',
+          callId: payload.callId ?? cleared?.callId,
+        });
+      }
     });
   });
 

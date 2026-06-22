@@ -29,6 +29,7 @@ import { normalizePhone, phoneSearchPatterns } from '../lib/phone';
 import { findDmMongoId, ensureDmConversation } from '../lib/dmConversation';
 import { friendsRouter } from './friends/friends.routes';
 import { areFriends } from './friends/friends.service';
+import { callsRouter } from './calls/calls.routes';
 
 export const apiRouter = Router();
 
@@ -46,6 +47,7 @@ apiRouter.use(complianceRouter);
 apiRouter.use(adminRouter);
 apiRouter.use(aiAgentRouter);
 apiRouter.use('/friends', friendsRouter);
+apiRouter.use('/calls', callsRouter);
 
 // Chats & messages
 apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
@@ -338,9 +340,8 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
 
     const stripEnc = (s: string) => (typeof s === 'string' && s.startsWith('ENC:') ? s.slice(4) : s);
 
-    return res.json({
-      success: true,
-      data: visibleMessages.map((m: any) => ({
+    const data = await Promise.all(
+      visibleMessages.map(async (m: any) => ({
         id: String(m._id),
         chatId: listChatId,
         senderId: String(m.senderId),
@@ -348,7 +349,7 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
         media: m.content?.mediaUrl
           ? {
               type: m.content.mediaType,
-              uri: m.content.mediaUrl,
+              uri: await resolveStoredMediaUrl(m.content.mediaUrl),
               duration: m.content.metadata?.durationSec,
               name: m.content.metadata?.name,
               size: m.content.metadata?.size
@@ -357,6 +358,11 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
         timestamp: m.createdAt,
         status: 'sent'
       }))
+    );
+
+    return res.json({
+      success: true,
+      data
     });
   } catch (error) {
     console.error('Failed to fetch messages', error);

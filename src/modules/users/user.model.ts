@@ -61,7 +61,8 @@ const userSchema = new Schema(
       enum: ['user', 'admin', 'super_admin', 'moderator', 'analyst'],
       default: 'user',
       index: true
-    }
+    },
+    expoPushTokens: { type: [String], default: [] }
   },
   {
     timestamps: true
