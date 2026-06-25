@@ -510,12 +510,18 @@ export function createSocketServer(httpServer: HttpServer): Server {
           isVideo,
           offer: payload.offer,
         });
-        if (!stored) {
+
+        const socketsInRoom = io.sockets.adapter.rooms.get(`user:${receiverId}`)?.size ?? 0;
+
+        if (!stored && socketsInRoom === 0) {
           socket.emit('call:failed', { reason: 'storage_unavailable' });
           return;
         }
 
-        const socketsInRoom = io.sockets.adapter.rooms.get(`user:${receiverId}`)?.size ?? 0;
+        if (!stored && socketsInRoom > 0) {
+          console.warn('[call:initiate] Redis store failed; callee is online via socket', receiverId);
+        }
+
         console.log('[call:initiate]', {
           callerId,
           receiverId,
