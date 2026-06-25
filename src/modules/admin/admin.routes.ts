@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import bcrypt from 'bcryptjs';
 import { Types } from 'mongoose';
-import { requireAdminRoles, type AuthedRequest } from '../../middleware/auth';
+import { requireAuth, type AuthedRequest } from '../../middleware/auth';
 import { UserModel } from '../users/user.model';
 import { ChannelModel } from '../channels/channel.model';
 import { MessageModel } from '../messages/message.model';
@@ -12,8 +13,21 @@ import { adminUserGalleryGet } from './user-gallery.controller';
 import { adminUserChatsList, adminChatMessagesGet } from './user-chats.controller';
 import { TranscriptModel } from '../ai/transcript.model';
 import { clampSearchQuery, escapeMongoRegex } from '../../lib/mongoRegex';
+import { canAdminAccessUser, requireAdminCapability } from './access';
 
 export const adminRouter = Router();
+
+type AdminUserRow = {
+  id: string;
+  name: string;
+  email: string;
+  username: string;
+  role: 'admin';
+  adminScope: 'global' | 'assigned';
+  createdAt: Date;
+  assignedUsersCount: number;
+  createdBySuperAdminId?: string;
+};
 
 async function logAdminAction(input: {
   actorUserId: string;
@@ -33,7 +47,35 @@ async function logAdminAction(input: {
   });
 }
 
-adminRouter.get('/admin/analytics/overview', requireAdminRoles(['admin', 'super_admin', 'analyst']), async (_req, res) => {
+async function listAdminUsers(): Promise<AdminUserRow[]> {
+  const admins = await UserModel.find({ role: 'admin' })
+    .sort({ createdAt: -1 })
+    .select('name email username role adminScope createdAt createdBySuperAdminId')
+    .lean();
+
+  const counts = await UserModel.aggregate([
+    { $match: { role: 'user', assignedAdminId: { $type: 'objectId' } } },
+    { $group: { _id: '$assignedAdminId', value: { $sum: 1 } } }
+  ]);
+  const countByAdminId = new Map(counts.map((row) => [String(row._id), Number(row.value ?? 0)]));
+
+  return admins.map((admin) => ({
+    id: String(admin._id),
+    name: admin.name,
+    email: admin.email,
+    username: admin.username,
+    role: 'admin',
+    adminScope: admin.adminScope === 'assigned' ? 'assigned' : 'global',
+    createdAt: admin.createdAt,
+    assignedUsersCount: countByAdminId.get(String(admin._id)) ?? 0,
+    createdBySuperAdminId: admin.createdBySuperAdminId ? String(admin.createdBySuperAdminId) : undefined
+  }));
+}
+
+adminRouter.get('/admin/analytics/overview', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'analytics');
+  if (!actor) return;
+
   const now = Date.now();
   const oneDayMs = 24 * 60 * 60 * 1000;
   const thirtyDaysAgo = new Date(now - 30 * oneDayMs);
@@ -74,7 +116,13 @@ adminRouter.get('/admin/analytics/overview', requireAdminRoles(['admin', 'super_
   });
 });
 
-adminRouter.get('/admin/activities', requireAdminRoles(['admin', 'super_admin']), async (_req, res) => {
+adminRouter.get('/admin/activities', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'user_management');
+  if (!actor) return;
+  if (actor.role !== 'super_admin' && actor.adminScope !== 'global') {
+    return res.status(403).json({ success: false, message: 'This admin account is limited to assigned users only' });
+  }
+
   const [recentUsers, recentLogins] = await Promise.all([
     UserModel.find().sort({ createdAt: -1 }).limit(30).lean(),
     RefreshTokenModel.find().sort({ createdAt: -1 }).limit(30).lean()
@@ -121,7 +169,10 @@ adminRouter.get('/admin/activities', requireAdminRoles(['admin', 'super_admin'])
   return res.json({ success: true, data: activities.slice(0, 100) });
 });
 
-adminRouter.get('/admin/channels', requireAdminRoles(['admin', 'super_admin', 'moderator']), async (_req, res) => {
+adminRouter.get('/admin/channels', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'channels');
+  if (!actor) return;
+
   const channels = await ChannelModel.find().sort({ createdAt: -1 }).limit(300).lean();
   return res.json({
     success: true,
@@ -140,7 +191,13 @@ adminRouter.get('/admin/channels', requireAdminRoles(['admin', 'super_admin', 'm
   });
 });
 
-adminRouter.post('/admin/channels/:id/demonetise', requireAdminRoles(['admin', 'super_admin']), async (req: AuthedRequest, res) => {
+adminRouter.post('/admin/channels/:id/demonetise', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'channels');
+  if (!actor) return;
+  if (actor.role !== 'super_admin' && actor.role !== 'admin') {
+    return res.status(403).json({ success: false, message: 'Only admins can stop paid earnings' });
+  }
+
   const channel = await ChannelModel.findById(req.params.id);
   if (!channel) return res.status(404).json({ success: false, message: 'Channel not found' });
   channel.accessType = 'free';
@@ -156,7 +213,10 @@ adminRouter.post('/admin/channels/:id/demonetise', requireAdminRoles(['admin', '
   return res.json({ success: true, data: { id: String(channel._id), accessType: channel.accessType } });
 });
 
-adminRouter.post('/admin/channels/:id/verify', requireAdminRoles(['admin', 'super_admin', 'moderator']), async (req: AuthedRequest, res) => {
+adminRouter.post('/admin/channels/:id/verify', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'channels');
+  if (!actor) return;
+
   const channel = await ChannelModel.findById(req.params.id);
   if (!channel) return res.status(404).json({ success: false, message: 'Channel not found' });
   channel.category = 'verified';
@@ -170,7 +230,13 @@ adminRouter.post('/admin/channels/:id/verify', requireAdminRoles(['admin', 'supe
   return res.json({ success: true, data: { id: String(channel._id), category: channel.category } });
 });
 
-adminRouter.delete('/admin/channels/:id', requireAdminRoles(['admin', 'super_admin']), async (req: AuthedRequest, res) => {
+adminRouter.delete('/admin/channels/:id', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'channels');
+  if (!actor) return;
+  if (actor.role !== 'super_admin' && actor.role !== 'admin') {
+    return res.status(403).json({ success: false, message: 'Only admins can remove a channel' });
+  }
+
   const channel = await ChannelModel.findByIdAndDelete(req.params.id);
   if (!channel) return res.status(404).json({ success: false, message: 'Channel not found' });
   await logAdminAction({
@@ -182,7 +248,10 @@ adminRouter.delete('/admin/channels/:id', requireAdminRoles(['admin', 'super_adm
   return res.json({ success: true, data: { id: String(channel._id) } });
 });
 
-adminRouter.get('/admin/moderation/reports', requireAdminRoles(['admin', 'super_admin', 'moderator']), async (req, res) => {
+adminRouter.get('/admin/moderation/reports', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'moderation');
+  if (!actor) return;
+
   const status = typeof req.query.status === 'string' ? req.query.status : 'pending';
   const query = status === 'all' ? {} : { status };
   const reports = await ReportedContentModel.find(query).sort({ createdAt: -1 }).limit(200).lean();
@@ -203,7 +272,10 @@ adminRouter.get('/admin/moderation/reports', requireAdminRoles(['admin', 'super_
   });
 });
 
-adminRouter.post('/admin/moderation/reports', requireAdminRoles(['admin', 'super_admin', 'moderator']), async (req: AuthedRequest, res) => {
+adminRouter.post('/admin/moderation/reports', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'moderation');
+  if (!actor) return;
+
   const entityType = typeof req.body.entityType === 'string' ? req.body.entityType : '';
   const entityId = typeof req.body.entityId === 'string' ? req.body.entityId : '';
   const reason = typeof req.body.reason === 'string' ? req.body.reason.trim() : '';
@@ -219,7 +291,10 @@ adminRouter.post('/admin/moderation/reports', requireAdminRoles(['admin', 'super
   return res.status(201).json({ success: true, data: { id: String(report._id) } });
 });
 
-adminRouter.post('/admin/moderation/reports/:id/action', requireAdminRoles(['admin', 'super_admin', 'moderator']), async (req: AuthedRequest, res) => {
+adminRouter.post('/admin/moderation/reports/:id/action', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'moderation');
+  if (!actor) return;
+
   const action = req.body.action === 'approve' ? 'approved' : req.body.action === 'remove' ? 'removed' : '';
   const note = typeof req.body.note === 'string' ? req.body.note : '';
   if (!action) return res.status(400).json({ success: false, message: 'action must be approve or remove' });
@@ -253,7 +328,167 @@ adminRouter.post('/admin/moderation/reports/:id/action', requireAdminRoles(['adm
   return res.json({ success: true, data: { id: String(report._id), status: report.status } });
 });
 
-adminRouter.patch('/admin/users/:id/role', requireAdminRoles(['admin', 'super_admin']), async (req: AuthedRequest, res) => {
+adminRouter.get('/admin/admin-users', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'admin_management');
+  if (!actor) return;
+  return res.json({ success: true, data: await listAdminUsers() });
+});
+
+adminRouter.post('/admin/admin-users', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'admin_management');
+  if (!actor) return;
+
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const usernameRaw = typeof req.body.username === 'string' ? req.body.username.trim().toLowerCase() : '';
+  const password = typeof req.body.password === 'string' ? req.body.password : '';
+  const username = usernameRaw || email.split('@')[0] || '';
+
+  if (name.length < 2) {
+    return res.status(400).json({ success: false, message: 'Name must be at least 2 characters' });
+  }
+  if (!/^\S+@\S+\.\S+$/.test(email)) {
+    return res.status(400).json({ success: false, message: 'Valid email is required' });
+  }
+  if (!/^[a-z0-9_.]{3,24}$/i.test(username)) {
+    return res.status(400).json({ success: false, message: 'Username must be 3-24 letters, numbers, underscores, or dots' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
+  }
+
+  const existing = await UserModel.findOne({ $or: [{ email }, { username }] }).select('_id').lean();
+  if (existing) {
+    return res.status(409).json({ success: false, message: 'Email or username already exists' });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 12);
+  const user = await UserModel.create({
+    name,
+    email,
+    username,
+    passwordHash,
+    role: 'admin',
+    adminScope: 'assigned',
+    isVerified: true,
+    hasCompletedProfile: true,
+    createdBySuperAdminId: new Types.ObjectId(req.auth!.userId)
+  });
+
+  await logAdminAction({
+    actorUserId: req.auth!.userId,
+    action: 'admin_created',
+    targetType: 'user',
+    targetId: String(user._id),
+    metadata: { adminScope: 'assigned' }
+  });
+
+  return res.status(201).json({
+    success: true,
+    data: {
+      id: String(user._id),
+      name: user.name,
+      email: user.email,
+      username: user.username,
+      role: user.role,
+      adminScope: user.adminScope
+    }
+  });
+});
+
+adminRouter.post('/admin/admin-users/:adminId/assign-users', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'admin_management');
+  if (!actor) return;
+
+  const adminId = Array.isArray(req.params.adminId) ? req.params.adminId[0] : req.params.adminId;
+  if (!adminId || !Types.ObjectId.isValid(adminId)) {
+    return res.status(400).json({ success: false, message: 'Valid admin id is required' });
+  }
+  const targetAdmin = await UserModel.findById(adminId).select('role adminScope').lean();
+  if (!targetAdmin || targetAdmin.role !== 'admin' || targetAdmin.adminScope !== 'assigned') {
+    return res.status(404).json({ success: false, message: 'Admin not found' });
+  }
+
+  const rawUserIds: unknown[] = Array.isArray(req.body.userIds) ? req.body.userIds : [];
+  const userIds = [...new Set(rawUserIds.map((value: unknown) => String(value)).filter((id: string) => Types.ObjectId.isValid(id)))];
+  const assignmentNote = typeof req.body.assignmentNote === 'string' ? req.body.assignmentNote.trim().slice(0, 500) : '';
+  if (!userIds.length) {
+    return res.status(400).json({ success: false, message: 'At least one valid user id is required' });
+  }
+
+  const now = new Date();
+  const result = await UserModel.updateMany(
+    {
+      _id: { $in: userIds.map((id) => new Types.ObjectId(id)) },
+      role: 'user'
+    },
+    {
+      $set: {
+        assignedAdminId: new Types.ObjectId(adminId),
+        assignedBySuperAdminId: new Types.ObjectId(req.auth!.userId),
+        assignedAt: now,
+        assignmentNote
+      }
+    }
+  );
+
+  await logAdminAction({
+    actorUserId: req.auth!.userId,
+    action: 'users_assigned_to_admin',
+    targetType: 'user_assignment',
+    targetId: adminId,
+    metadata: { userIds, assignmentNote }
+  });
+
+  return res.json({ success: true, data: { adminId, matched: result.matchedCount, updated: result.modifiedCount } });
+});
+
+adminRouter.post('/admin/admin-users/:adminId/unassign-users', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'admin_management');
+  if (!actor) return;
+
+  const adminId = Array.isArray(req.params.adminId) ? req.params.adminId[0] : req.params.adminId;
+  if (!adminId || !Types.ObjectId.isValid(adminId)) {
+    return res.status(400).json({ success: false, message: 'Valid admin id is required' });
+  }
+
+  const rawUserIds: unknown[] = Array.isArray(req.body.userIds) ? req.body.userIds : [];
+  const userIds = [...new Set(rawUserIds.map((value: unknown) => String(value)).filter((id: string) => Types.ObjectId.isValid(id)))];
+  if (!userIds.length) {
+    return res.status(400).json({ success: false, message: 'At least one valid user id is required' });
+  }
+
+  const result = await UserModel.updateMany(
+    {
+      _id: { $in: userIds.map((id) => new Types.ObjectId(id)) },
+      role: 'user',
+      assignedAdminId: new Types.ObjectId(adminId)
+    },
+    {
+      $unset: {
+        assignedAdminId: '',
+        assignedBySuperAdminId: '',
+        assignedAt: '',
+        assignmentNote: ''
+      }
+    }
+  );
+
+  await logAdminAction({
+    actorUserId: req.auth!.userId,
+    action: 'users_unassigned_from_admin',
+    targetType: 'user_assignment',
+    targetId: adminId,
+    metadata: { userIds }
+  });
+
+  return res.json({ success: true, data: { adminId, matched: result.matchedCount, updated: result.modifiedCount } });
+});
+
+adminRouter.patch('/admin/users/:id/role', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'admin_management');
+  if (!actor) return;
+
   const role =
     req.body.role === 'user' ||
     req.body.role === 'admin' ||
@@ -271,20 +506,8 @@ adminRouter.patch('/admin/users/:id/role', requireAdminRoles(['admin', 'super_ad
     return res.status(400).json({ success: false, message: 'Cannot change your own role' });
   }
 
-  const actor = await UserModel.findById(req.auth!.userId).lean();
-  if (!actor) {
-    return res.status(403).json({ success: false, message: 'Forbidden' });
-  }
-  if (role === 'super_admin' && actor.role !== 'super_admin') {
-    return res.status(403).json({ success: false, message: 'Only a super admin can assign the super admin role' });
-  }
-
   const user = await UserModel.findById(req.params.id);
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-  if (user.role === 'super_admin' && actor.role !== 'super_admin') {
-    return res.status(403).json({ success: false, message: 'Only a super admin can modify another super admin' });
-  }
 
   if (user.role === 'super_admin' && role !== 'super_admin') {
     const superAdminCount = await UserModel.countDocuments({ role: 'super_admin' });
@@ -294,6 +517,14 @@ adminRouter.patch('/admin/users/:id/role', requireAdminRoles(['admin', 'super_ad
   }
 
   user.role = role;
+  user.adminScope = role === 'admin' ? 'assigned' : 'global';
+  user.createdBySuperAdminId = role === 'admin' ? new Types.ObjectId(req.auth!.userId) : undefined;
+  if (role !== 'user') {
+    user.assignedAdminId = undefined;
+    user.assignedBySuperAdminId = undefined;
+    user.assignedAt = undefined;
+    user.assignmentNote = '';
+  }
   await user.save();
   await logAdminAction({
     actorUserId: req.auth!.userId,
@@ -305,14 +536,17 @@ adminRouter.patch('/admin/users/:id/role', requireAdminRoles(['admin', 'super_ad
   return res.json({ success: true, data: { id: String(user._id), role: user.role } });
 });
 
-adminRouter.get('/admin/users/:userId/gallery', requireAdminRoles(['admin', 'super_admin']), adminUserGalleryGet);
+adminRouter.get('/admin/users/:userId/gallery', requireAuth, adminUserGalleryGet);
 
-adminRouter.get('/admin/users/:userId/chats', requireAdminRoles(['admin', 'super_admin']), adminUserChatsList);
+adminRouter.get('/admin/users/:userId/chats', requireAuth, adminUserChatsList);
 
-adminRouter.get('/admin/chats/:conversationId/messages', requireAdminRoles(['admin', 'super_admin']), adminChatMessagesGet);
+adminRouter.get('/admin/chats/:conversationId/messages', requireAuth, adminChatMessagesGet);
 
 /** Whisper / speech transcripts (voice messages, device call transcripts, etc.) — lead admin & admin only. */
-adminRouter.get('/admin/transcripts', requireAdminRoles(['admin', 'super_admin']), async (req, res) => {
+adminRouter.get('/admin/transcripts', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'transcripts');
+  if (!actor) return;
+
   const userId = typeof req.query.userId === 'string' ? req.query.userId.trim() : '';
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 80));
   const filter =
@@ -351,10 +585,16 @@ adminRouter.get('/admin/transcripts', requireAdminRoles(['admin', 'super_admin']
   });
 });
 
-adminRouter.get('/admin/users/:userId/transcripts', requireAdminRoles(['admin', 'super_admin']), async (req, res) => {
+adminRouter.get('/admin/users/:userId/transcripts', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'transcripts');
+  if (!actor) return;
+
   const uid = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
   if (!uid || !Types.ObjectId.isValid(uid)) {
     return res.status(400).json({ success: false, message: 'Invalid user id' });
+  }
+  if (!(await canAdminAccessUser(actor, uid))) {
+    return res.status(403).json({ success: false, message: 'You cannot access this user' });
   }
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 80));
   const rows = await TranscriptModel.find({ userId: new Types.ObjectId(uid) })
@@ -384,19 +624,30 @@ adminRouter.get('/admin/users/:userId/transcripts', requireAdminRoles(['admin', 
   });
 });
 
-adminRouter.get('/admin/users', requireAdminRoles(['admin', 'super_admin']), async (req, res) => {
+adminRouter.get('/admin/users', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'user_management');
+  if (!actor) return;
+
   const q = clampSearchQuery(typeof req.query.q === 'string' ? req.query.q : '');
   const literal = q ? escapeMongoRegex(q) : '';
+  const baseQuery = actor.role === 'super_admin' || actor.adminScope === 'global'
+    ? { role: 'user' }
+    : { role: 'user', assignedAdminId: actor._id };
   const query = literal
     ? {
+        ...baseQuery,
         $or: [
           { email: { $regex: literal, $options: 'i' } },
           { username: { $regex: literal, $options: 'i' } },
           { name: { $regex: literal, $options: 'i' } }
         ]
       }
-    : {};
-  const users = await UserModel.find(query).sort({ createdAt: -1 }).limit(300).lean();
+    : baseQuery;
+  const users = await UserModel.find(query)
+    .sort({ createdAt: -1 })
+    .limit(300)
+    .populate('assignedAdminId', 'name email')
+    .lean();
   return res.json({
     success: true,
     data: users.map((user) => ({
@@ -411,13 +662,30 @@ adminRouter.get('/admin/users', requireAdminRoles(['admin', 'super_admin']), asy
       hasCompletedProfile: user.hasCompletedProfile,
       followers: user.followers.length,
       following: user.following.length,
+      assignedAdminId:
+        user.assignedAdminId && typeof user.assignedAdminId === 'object' && '_id' in (user.assignedAdminId as object)
+          ? String((user.assignedAdminId as any)._id)
+          : user.assignedAdminId
+            ? String(user.assignedAdminId)
+            : null,
+      assignedAdminName:
+        user.assignedAdminId && typeof user.assignedAdminId === 'object' && '_id' in (user.assignedAdminId as object)
+          ? ((user.assignedAdminId as any).name ?? '')
+          : '',
+      assignmentNote: user.assignmentNote ?? '',
       createdAt: user.createdAt
     }))
   });
 });
 
-adminRouter.post('/admin/users/:id/suspend', requireAdminRoles(['admin', 'super_admin']), async (req: AuthedRequest, res) => {
-  const user = await UserModel.findById(req.params.id);
+adminRouter.post('/admin/users/:id/suspend', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'user_management');
+  if (!actor) return;
+  const userId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!userId || !(await canAdminAccessUser(actor, userId))) {
+    return res.status(403).json({ success: false, message: 'You cannot manage this user' });
+  }
+  const user = await UserModel.findById(userId);
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
   user.isSuspended = true;
   await user.save();
@@ -430,8 +698,14 @@ adminRouter.post('/admin/users/:id/suspend', requireAdminRoles(['admin', 'super_
   return res.json({ success: true, data: { id: String(user._id), isSuspended: user.isSuspended } });
 });
 
-adminRouter.post('/admin/users/:id/unsuspend', requireAdminRoles(['admin', 'super_admin']), async (req: AuthedRequest, res) => {
-  const user = await UserModel.findById(req.params.id);
+adminRouter.post('/admin/users/:id/unsuspend', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'user_management');
+  if (!actor) return;
+  const userId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!userId || !(await canAdminAccessUser(actor, userId))) {
+    return res.status(403).json({ success: false, message: 'You cannot manage this user' });
+  }
+  const user = await UserModel.findById(userId);
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
   user.isSuspended = false;
   await user.save();
@@ -444,7 +718,9 @@ adminRouter.post('/admin/users/:id/unsuspend', requireAdminRoles(['admin', 'supe
   return res.json({ success: true, data: { id: String(user._id), isSuspended: user.isSuspended } });
 });
 
-adminRouter.delete('/admin/users/:id', requireAdminRoles(['super_admin']), async (req: AuthedRequest, res) => {
+adminRouter.delete('/admin/users/:id', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'admin_management');
+  if (!actor) return;
   const user = await UserModel.findById(req.params.id);
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
   if (user.role === 'super_admin') {
@@ -462,4 +738,3 @@ adminRouter.delete('/admin/users/:id', requireAdminRoles(['super_admin']), async
   });
   return res.json({ success: true, data: { id: String(user._id) } });
 });
-

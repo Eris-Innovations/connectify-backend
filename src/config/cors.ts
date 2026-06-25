@@ -1,12 +1,44 @@
+import { env } from './env';
+
+const allowedOrigins = new Set(
+  (env.ALLOWED_CORS_ORIGINS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
+
+function isAllowedDevelopmentOrigin(origin: string): boolean {
+  if (env.NODE_ENV !== 'development') return false;
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
+
 /**
- * Allows requests from any `Origin` (browsers, Expo web, admin dashboards, etc.) and requests
- * with no `Origin` header (native Android/iOS, curl, Postman).
- *
- * Security note: tighten this (whitelist) if the API is only meant for known frontends.
+ * Allow native mobile / server-to-server requests with no Origin header.
+ * Browser callers must be explicitly whitelisted in ALLOWED_CORS_ORIGINS.
  */
 export function resolveCorsOrigin(
-  _origin: string | undefined,
+  origin: string | undefined,
   callback: (err: Error | null, allow?: boolean) => void
 ): void {
-  callback(null, true);
+  if (!origin) {
+    callback(null, true);
+    return;
+  }
+
+  if (allowedOrigins.has(origin)) {
+    callback(null, true);
+    return;
+  }
+
+  if (isAllowedDevelopmentOrigin(origin)) {
+    callback(null, true);
+    return;
+  }
+
+  console.warn(`[cors] blocked origin: ${origin}`);
+  callback(new Error(`CORS blocked for origin: ${origin}`));
+}
+
+export function getAllowedCorsOrigins(): string[] {
+  return [...allowedOrigins];
 }

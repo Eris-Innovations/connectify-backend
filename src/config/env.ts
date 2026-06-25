@@ -69,6 +69,8 @@ const envSchema = z.object({
   RESEND_API_KEY: optionalTrimmed('RESEND_API_KEY'),
   /** Sender on a domain verified in Resend, e.g. `Connectify <noreply@yourdomain.com>` (required with RESEND_API_KEY). */
   EMAIL_FROM: optionalTrimmedLoose(),
+  /** Comma-separated browser origins allowed to call the API. Native mobile requests usually have no Origin header and still work. */
+  ALLOWED_CORS_ORIGINS: optionalTrimmedLoose(),
   /** Optional Expo access token for higher push rate limits (EAS project). */
   EXPO_ACCESS_TOKEN: optionalTrimmed('EXPO_ACCESS_TOKEN')
 });
@@ -109,4 +111,3 @@ if (r2Configured && env.R2_ENDPOINT?.includes(env.R2_BUCKET ?? '__no_bucket__'))
     `[R2] R2_ENDPOINT should not include the bucket path (…/connectify). Use https://<account_id>.r2.cloudflarestorage.com and set R2_BUCKET separately.`
   );
 }
-

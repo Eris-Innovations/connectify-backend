@@ -4,6 +4,8 @@ import { UserModel } from '../users/user.model';
 import { ConversationModel } from '../messages/conversation.model';
 import { MessageModel } from '../messages/message.model';
 import { resolveVirtualConversationId } from '../../lib/conversationIds';
+import type { AuthedRequest } from '../../middleware/auth';
+import { canAdminAccessConversation, canAdminAccessUser, requireAdminCapability } from './access';
 
 function stripEnc(s: string): string {
   return typeof s === 'string' && s.startsWith('ENC:') ? s.slice(4) : s;
@@ -27,10 +29,17 @@ function participantUserIdString(p: { userId: PopulatedUser | Types.ObjectId | u
 
 /** GET /admin/users/:userId/chats */
 export async function adminUserChatsList(req: Request, res: Response): Promise<void> {
+  const actor = await requireAdminCapability(req as AuthedRequest, res, 'user_management');
+  if (!actor) return;
+
   const rawId = req.params.userId;
   const userId = Array.isArray(rawId) ? rawId[0] : rawId;
   if (!userId || !Types.ObjectId.isValid(userId)) {
     res.status(400).json({ success: false, message: 'Invalid user id' });
+    return;
+  }
+  if (!(await canAdminAccessUser(actor, userId))) {
+    res.status(403).json({ success: false, message: 'You cannot access this user' });
     return;
   }
 
@@ -94,9 +103,16 @@ export async function adminUserChatsList(req: Request, res: Response): Promise<v
 
 /** GET /admin/chats/:conversationId/messages — moderation read; no participant membership check. */
 export async function adminChatMessagesGet(req: Request, res: Response): Promise<void> {
+  const actor = await requireAdminCapability(req as AuthedRequest, res, 'user_management');
+  if (!actor) return;
+
   const paramId = singleParam(req.params.conversationId);
   if (!paramId) {
     res.status(400).json({ success: false, message: 'Conversation id required' });
+    return;
+  }
+  if (!(await canAdminAccessConversation(actor, paramId))) {
+    res.status(403).json({ success: false, message: 'You cannot access this conversation' });
     return;
   }
 
@@ -107,13 +123,26 @@ export async function adminChatMessagesGet(req: Request, res: Response): Promise
     return;
   }
 
+  const wantsAll =
+    typeof req.query.all === 'string' &&
+    ['1', 'true', 'yes'].includes(req.query.all.trim().toLowerCase());
   const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : 80;
-  const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, Math.floor(limitRaw))) : 80;
+  const limit = Number.isFinite(limitRaw) ? Math.min(5000, Math.max(1, Math.floor(limitRaw))) : 80;
 
-  const messages = await MessageModel.find({ conversationId: mongoConvId })
-    .sort({ createdAt: -1 })
-    .limit(limit)
-    .lean();
+  const messageQuery = MessageModel.find({ conversationId: mongoConvId }).sort({ createdAt: 1 });
+  if (!wantsAll) {
+    messageQuery.limit(limit);
+  }
+  const messages = await messageQuery.lean();
+
+  const senderIds = [...new Set(messages.map((m: any) => String(m.senderId)).filter((id) => Types.ObjectId.isValid(id)))];
+  const senders =
+    senderIds.length > 0
+      ? await UserModel.find({ _id: { $in: senderIds.map((id) => new Types.ObjectId(id)) } })
+          .select('name username')
+          .lean()
+      : [];
+  const senderById = new Map(senders.map((sender) => [String(sender._id), sender]));
 
   const listChatId = paramId.startsWith('dm:') ? paramId : String(mongoConvId);
 
@@ -125,7 +154,18 @@ export async function adminChatMessagesGet(req: Request, res: Response): Promise
       type: (conv as any).type,
       title: (conv as any).title ?? null,
       isSecret: Boolean((conv as any).isSecret),
+      allMessagesLoaded: wantsAll,
+      messageCount: messages.length,
       messages: messages.map((m: any) => ({
+        ...(senderById.get(String(m.senderId))
+          ? {
+              senderName: senderById.get(String(m.senderId))?.name ?? null,
+              senderUsername: senderById.get(String(m.senderId))?.username ?? null
+            }
+          : {
+              senderName: null,
+              senderUsername: null
+            }),
         id: String(m._id),
         chatId: listChatId,
         senderId: String(m.senderId),

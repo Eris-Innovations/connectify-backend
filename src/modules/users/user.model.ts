@@ -62,6 +62,17 @@ const userSchema = new Schema(
       default: 'user',
       index: true
     },
+    adminScope: {
+      type: String,
+      enum: ['global', 'assigned'],
+      default: 'global',
+      index: true
+    },
+    createdBySuperAdminId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    assignedAdminId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    assignedBySuperAdminId: { type: Schema.Types.ObjectId, ref: 'User' },
+    assignedAt: { type: Date },
+    assignmentNote: { type: String, default: '' },
     expoPushTokens: { type: [String], default: [] }
   },
   {
