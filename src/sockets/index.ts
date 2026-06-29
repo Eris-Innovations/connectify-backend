@@ -21,7 +21,7 @@ import {
   getActiveCall,
   setActiveCall,
 } from '../modules/calls/active-call.service';
-import { setSocketIo } from './io';
+import { setSocketIo, setUserAppForeground, clearUserAppForeground, shouldDeliverPushToUser } from './io';
 
 type SocketAuthPayload = {
   userId: string;
@@ -53,6 +53,14 @@ export function createSocketServer(httpServer: HttpServer): Server {
     socket.join(userRoom);
 
     const userId = socket.data.userId as string;
+    setUserAppForeground(userId, true);
+
+    socket.on('app:state', (payload: { state?: string }) => {
+      const raw = typeof payload?.state === 'string' ? payload.state : '';
+      const foreground = raw === 'active';
+      setUserAppForeground(userId, foreground);
+      console.log('[socket.app:state]', { userId, state: raw, foreground });
+    });
     
     const isUserConnected = (uid: string) => {
       const room = io.sockets.adapter.rooms.get(`user:${uid}`);
@@ -163,6 +171,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
     socket.on('disconnect', async () => {
       clearInterval(presenceInterval);
       const stillOnline = isUserConnected(userId);
+      if (!stillOnline) {
+        clearUserAppForeground(userId);
+      }
       const lastSeenAt = stillOnline ? undefined : new Date();
       if (lastSeenAt) {
         await UserModel.findByIdAndUpdate(userId, { $set: { lastSeenAt } }).exec();
@@ -376,15 +387,29 @@ export function createSocketServer(httpServer: HttpServer): Server {
           });
         }
 
-        const offlineRecipients = [...recipientIds].filter(
-          (pid) => pid !== senderId && !isUserConnected(pid)
+        const pushRecipients = [...recipientIds].filter(
+          (pid) => pid !== senderId && shouldDeliverPushToUser(pid)
         );
-        if (offlineRecipients.length > 0) {
+        if (pushRecipients.length > 0) {
           const senderName = senderPreview.name || senderPreview.username || 'New message';
-          for (const recipientId of offlineRecipients) {
+          for (const recipientId of pushRecipients) {
             void (async () => {
               const tokens = await getExpoPushTokensForUser(recipientId);
-              if (tokens.length === 0) return;
+              if (tokens.length === 0) {
+                console.warn('[push.message] skipped — no tokens', {
+                  recipientId,
+                  conversationId: rawConv,
+                  messageId: String(created._id),
+                  socketConnected: isUserConnected(recipientId),
+                });
+                return;
+              }
+              console.log('[push.message] sending', {
+                recipientId,
+                conversationId: rawConv,
+                messageId: String(created._id),
+                tokenCount: tokens.length,
+              });
               await sendChatMessagePush(tokens, {
                 senderName,
                 preview: previewText,
@@ -559,28 +584,31 @@ export function createSocketServer(httpServer: HttpServer): Server {
 
         socket.emit('call:ringing', { callId: pending.callId, receiverId });
 
-        if (socketsInRoom > 0) {
+        if (!shouldDeliverPushToUser(receiverId)) {
+          console.log('[call:initiate] skip push — callee active in app', { receiverId, socketsInRoom });
           return;
         }
 
         try {
-          const callee = await UserModel.findById(receiverId).select('expoPushTokens settings').lean();
-          const tokens = Array.isArray(callee?.expoPushTokens)
-            ? callee!.expoPushTokens.filter((t): t is string => typeof t === 'string' && t.startsWith('ExponentPushToken['))
-            : [];
-          const notificationsEnabled = callee?.settings?.notificationsEnabled !== false;
-          if (notificationsEnabled && tokens.length > 0) {
+          const tokens = await getExpoPushTokensForUser(receiverId);
+          if (tokens.length > 0) {
+            console.log('[push.call] sending', {
+              receiverId,
+              callId: pending.callId,
+              tokenCount: tokens.length,
+              socketsInRoom,
+            });
             await sendIncomingCallPush(tokens, {
               callId: pending.callId,
               callerId,
               callerName: payload.callerName ?? 'Unknown',
               isVideo,
             });
-          } else if (tokens.length === 0) {
-            console.warn('[call:initiate] no push tokens for receiver', receiverId);
+          } else {
+            console.warn('[push.call] skipped — no tokens', { receiverId, callId: pending.callId, socketsInRoom });
           }
         } catch (err) {
-          console.warn('[call:initiate] push failed', err);
+          console.warn('[push.call] send failed', receiverId, err);
         }
       } catch (error) {
         console.error('[call:initiate] failed', error);

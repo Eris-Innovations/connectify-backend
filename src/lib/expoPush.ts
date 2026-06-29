@@ -40,6 +40,16 @@ export async function sendExpoPush(messages: ExpoPushMessage[]): Promise<void> {
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       console.warn('[expoPush] send failed', res.status, text.slice(0, 200));
+      return;
+    }
+    const body = (await res.json().catch(() => null)) as { data?: { status?: string }[] } | null;
+    const errors = Array.isArray(body?.data)
+      ? body.data.filter((row) => row?.status === 'error')
+      : [];
+    if (errors.length > 0) {
+      console.warn('[expoPush] delivery errors', JSON.stringify(errors).slice(0, 400));
+    } else {
+      console.log('[expoPush] sent', tokens.length, 'notification(s)');
     }
   } catch (err) {
     console.warn('[expoPush] send error', err);

@@ -10,6 +10,9 @@ export async function getMeController(req: AuthedRequest, res: Response) {
     return res.status(StatusCodes.NOT_FOUND).json({ success: false, message: 'User not found' });
   }
   const avatar = user.avatar ? await resolveStoredMediaUrl(user.avatar) : user.avatar;
+  const pushTokenCount = Array.isArray(user.expoPushTokens)
+    ? user.expoPushTokens.filter((t) => typeof t === 'string' && t.startsWith('ExponentPushToken[')).length
+    : 0;
 
   return res.status(StatusCodes.OK).json({
     success: true,
@@ -23,6 +26,7 @@ export async function getMeController(req: AuthedRequest, res: Response) {
       avatar,
       hasCompletedProfile: user.hasCompletedProfile,
       settings: user.settings,
+      pushTokenCount,
       role: user.role,
       adminScope: user.adminScope,
       isVerified: user.isVerified,
@@ -141,6 +145,11 @@ export async function registerPushTokenController(req: AuthedRequest, res: Respo
 
   await UserModel.findByIdAndUpdate(req.auth!.userId, {
     $addToSet: { expoPushTokens: token },
+  });
+
+  console.log('[push.token] registered', {
+    userId: req.auth!.userId,
+    tokenPrefix: token.slice(0, 28),
   });
 
   return res.status(StatusCodes.OK).json({ success: true });

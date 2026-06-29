@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { StatusCodes } from 'http-status-codes';
 import { requireAuth, type AuthedRequest } from '../../middleware/auth';
 import { dmVirtualId } from '../../lib/conversationIds';
-import { emitToUser, isUserConnected } from '../../sockets/io';
+import { emitToUser, shouldDeliverPushToUser } from '../../sockets/io';
 import { getExpoPushTokensForUser, sendFriendRequestPush } from '../../lib/expoPush';
 import { UserModel } from '../users/user.model';
 import {
@@ -45,12 +45,16 @@ friendsRouter.post('/requests', requireAuth, async (req: AuthedRequest, res) => 
     fromUserId: req.auth!.userId
   });
 
-  if (!isUserConnected(targetUserId)) {
+  if (shouldDeliverPushToUser(targetUserId)) {
     void (async () => {
       const tokens = await getExpoPushTokensForUser(targetUserId);
-      if (tokens.length === 0) return;
+      if (tokens.length === 0) {
+        console.warn('[push.friend_request] skipped — no tokens', { targetUserId });
+        return;
+      }
       const sender = await UserModel.findById(req.auth!.userId).select('name username').lean();
       const fromName = sender?.name || sender?.username || 'Someone';
+      console.log('[push.friend_request] sending', { targetUserId, tokenCount: tokens.length });
       await sendFriendRequestPush(tokens, {
         fromName,
         fromUserId: req.auth!.userId,
