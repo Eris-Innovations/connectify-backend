@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { StatusCodes } from 'http-status-codes';
 import { requireAuth, type AuthedRequest } from '../../middleware/auth';
 import { dmVirtualId } from '../../lib/conversationIds';
-import { emitToUser } from '../../sockets/io';
+import { emitToUser, isUserConnected } from '../../sockets/io';
+import { getExpoPushTokensForUser, sendFriendRequestPush } from '../../lib/expoPush';
+import { UserModel } from '../users/user.model';
 import {
   acceptFriendRequest,
   getFriendRelationship,
@@ -42,6 +44,20 @@ friendsRouter.post('/requests', requireAuth, async (req: AuthedRequest, res) => 
     connectionId: result.data.id,
     fromUserId: req.auth!.userId
   });
+
+  if (!isUserConnected(targetUserId)) {
+    void (async () => {
+      const tokens = await getExpoPushTokensForUser(targetUserId);
+      if (tokens.length === 0) return;
+      const sender = await UserModel.findById(req.auth!.userId).select('name username').lean();
+      const fromName = sender?.name || sender?.username || 'Someone';
+      await sendFriendRequestPush(tokens, {
+        fromName,
+        fromUserId: req.auth!.userId,
+        connectionId: result.data.id,
+      });
+    })();
+  }
 
   return res.status(StatusCodes.CREATED).json({ success: true, data: result.data });
 });

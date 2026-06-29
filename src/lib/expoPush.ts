@@ -1,4 +1,5 @@
 import { env } from '../config/env';
+import { UserModel } from '../modules/users/user.model';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 
@@ -13,6 +14,10 @@ export type ExpoPushMessage = {
   categoryId?: string;
   ttl?: number;
 };
+
+function filterValidExpoTokens(tokens: string[]): string[] {
+  return [...new Set(tokens.filter((t) => typeof t === 'string' && t.startsWith('ExponentPushToken[')))];
+}
 
 export async function sendExpoPush(messages: ExpoPushMessage[]): Promise<void> {
   const tokens = messages.map((m) => m.to).filter(Boolean);
@@ -41,6 +46,28 @@ export async function sendExpoPush(messages: ExpoPushMessage[]): Promise<void> {
   }
 }
 
+export async function shouldSendPush(userId: string): Promise<boolean> {
+  try {
+    const user = await UserModel.findById(userId).select('expoPushTokens settings').lean();
+    if (!user) return false;
+    if (user.settings?.notificationsEnabled === false) return false;
+    const tokens = filterValidExpoTokens(Array.isArray(user.expoPushTokens) ? user.expoPushTokens : []);
+    return tokens.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function getExpoPushTokensForUser(userId: string): Promise<string[]> {
+  try {
+    const user = await UserModel.findById(userId).select('expoPushTokens settings').lean();
+    if (!user || user.settings?.notificationsEnabled === false) return [];
+    return filterValidExpoTokens(Array.isArray(user.expoPushTokens) ? user.expoPushTokens : []);
+  } catch {
+    return [];
+  }
+}
+
 export async function sendIncomingCallPush(
   tokens: string[],
   payload: {
@@ -50,7 +77,7 @@ export async function sendIncomingCallPush(
     isVideo: boolean;
   }
 ): Promise<void> {
-  const unique = [...new Set(tokens.filter((t) => t.startsWith('ExponentPushToken[')))];
+  const unique = filterValidExpoTokens(tokens);
   if (unique.length === 0) return;
 
   await sendExpoPush(
@@ -69,6 +96,65 @@ export async function sendIncomingCallPush(
         callerId: payload.callerId,
         callerName: payload.callerName,
         isVideo: payload.isVideo ? '1' : '0',
+      },
+    }))
+  );
+}
+
+export async function sendChatMessagePush(
+  tokens: string[],
+  payload: {
+    senderName: string;
+    preview: string;
+    chatId: string;
+    messageId: string;
+  }
+): Promise<void> {
+  const unique = filterValidExpoTokens(tokens);
+  if (unique.length === 0) return;
+
+  const preview = payload.preview.trim().slice(0, 120) || 'New message';
+
+  await sendExpoPush(
+    unique.map((to) => ({
+      to,
+      title: payload.senderName,
+      body: preview,
+      sound: 'default',
+      priority: 'high',
+      channelId: 'messages',
+      data: {
+        type: 'chat',
+        chatId: payload.chatId,
+        messageId: payload.messageId,
+      },
+    }))
+  );
+}
+
+export async function sendFriendRequestPush(
+  tokens: string[],
+  payload: {
+    fromName: string;
+    fromUserId: string;
+    connectionId: string;
+  }
+): Promise<void> {
+  const unique = filterValidExpoTokens(tokens);
+  if (unique.length === 0) return;
+
+  await sendExpoPush(
+    unique.map((to) => ({
+      to,
+      title: 'Friend request',
+      body: `${payload.fromName} sent you a friend request`,
+      sound: 'default',
+      priority: 'default',
+      channelId: 'default',
+      data: {
+        type: 'friend_request',
+        fromUserId: payload.fromUserId,
+        connectionId: payload.connectionId,
       },
     }))
   );

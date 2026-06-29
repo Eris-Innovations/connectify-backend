@@ -13,7 +13,7 @@ import { getDmPeerUserId } from '../lib/dmConversation';
 import { areFriends } from '../modules/friends/friends.service';
 import { scheduleVoiceMessageTranscription } from '../modules/ai/whisper.service';
 import { resolveStoredMediaUrl } from '../lib/r2';
-import { sendIncomingCallPush } from '../lib/expoPush';
+import { sendIncomingCallPush, getExpoPushTokensForUser, sendChatMessagePush } from '../lib/expoPush';
 import { clearPendingCall, clearPendingCallByCaller, getPendingCall, storePendingCall } from '../modules/calls/pending-call.service';
 import {
   clearActiveCall,
@@ -374,6 +374,25 @@ export function createSocketServer(httpServer: HttpServer): Server {
             messageId: String(created._id),
             recipientIds: deliveredRecipients,
           });
+        }
+
+        const offlineRecipients = [...recipientIds].filter(
+          (pid) => pid !== senderId && !isUserConnected(pid)
+        );
+        if (offlineRecipients.length > 0) {
+          const senderName = senderPreview.name || senderPreview.username || 'New message';
+          for (const recipientId of offlineRecipients) {
+            void (async () => {
+              const tokens = await getExpoPushTokensForUser(recipientId);
+              if (tokens.length === 0) return;
+              await sendChatMessagePush(tokens, {
+                senderName,
+                preview: previewText,
+                chatId: rawConv,
+                messageId: String(created._id),
+              });
+            })();
+          }
         }
       }
     );
