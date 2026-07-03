@@ -4,6 +4,7 @@ import type { AuthedRequest } from '../../middleware/auth';
 import { UserModel } from './user.model';
 import { updateMeSchema } from './users.schemas';
 import { resolveStoredMediaUrl } from '../../lib/r2';
+import { DevicePushTokenModel } from './device-push-token.model';
 export async function getMeController(req: AuthedRequest, res: Response) {
   const user = await UserModel.findById(req.auth!.userId).lean();
   if (!user) {
@@ -43,7 +44,14 @@ export async function updateMeController(req: AuthedRequest, res: Response) {
     return res.status(StatusCodes.BAD_REQUEST).json({ success: false, message: parsed.error.flatten() });
   }
 
-  const user = await UserModel.findByIdAndUpdate(req.auth!.userId, parsed.data.body, { new: true }).lean();
+  const { settings, ...profileFields } = parsed.data.body;
+  const update: Record<string, unknown> = { ...profileFields };
+  if (settings) {
+    for (const [key, value] of Object.entries(settings)) {
+      if (value !== undefined) update[`settings.${key}`] = value;
+    }
+  }
+  const user = await UserModel.findByIdAndUpdate(req.auth!.userId, { $set: update }, { new: true }).lean();
   if (!user) {
     return res.status(StatusCodes.NOT_FOUND).json({ success: false, message: 'User not found' });
   }
@@ -152,5 +160,51 @@ export async function registerPushTokenController(req: AuthedRequest, res: Respo
     tokenPrefix: token.slice(0, 28),
   });
 
+  return res.status(StatusCodes.OK).json({ success: true });
+}
+
+export async function upsertDevicePushTokenController(req: AuthedRequest, res: Response) {
+  const deviceId = typeof req.body?.deviceId === 'string' ? req.body.deviceId.trim() : '';
+  const platform = req.body?.platform === 'android' || req.body?.platform === 'ios' ? req.body.platform : '';
+  const expoToken = typeof req.body?.expoToken === 'string' ? req.body.expoToken.trim() : '';
+  const fcmToken = typeof req.body?.fcmToken === 'string' ? req.body.fcmToken.trim() : '';
+  if (!deviceId || deviceId.length > 200 || !platform || (!expoToken && !fcmToken)) {
+    return res.status(StatusCodes.BAD_REQUEST).json({
+      success: false,
+      message: 'Invalid device registration.',
+      errorCode: 'INVALID_DEVICE_REGISTRATION',
+      requestId: res.locals.requestId
+    });
+  }
+
+  const row = await DevicePushTokenModel.findOneAndUpdate(
+    { userId: req.auth!.userId, deviceId },
+    {
+      $set: {
+        platform,
+        expoToken,
+        fcmToken,
+        enabled: req.body?.enabled !== false,
+        messageEnabled: req.body?.messageEnabled !== false,
+        callEnabled: req.body?.callEnabled !== false,
+        appVersion: typeof req.body?.appVersion === 'string' ? req.body.appVersion.slice(0, 40) : '',
+        lastSeenAt: new Date()
+      }
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  ).lean();
+
+  if (expoToken.startsWith('ExponentPushToken[')) {
+    await UserModel.findByIdAndUpdate(req.auth!.userId, { $addToSet: { expoPushTokens: expoToken } });
+  }
+  return res.status(StatusCodes.OK).json({ success: true, data: { id: String(row!._id) } });
+}
+
+export async function deleteDevicePushTokenController(req: AuthedRequest, res: Response) {
+  const deviceId = Array.isArray(req.params.deviceId) ? req.params.deviceId[0] : req.params.deviceId;
+  if (!deviceId) {
+    return res.status(StatusCodes.BAD_REQUEST).json({ success: false, message: 'Device id is required.' });
+  }
+  await DevicePushTokenModel.deleteOne({ userId: req.auth!.userId, deviceId });
   return res.status(StatusCodes.OK).json({ success: true });
 }

@@ -1,10 +1,12 @@
-/** Normalize to E.164-style `+<digits>` (8–15 digits). Returns null if invalid. */
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
+
+/** Normalize a valid international number to E.164. Returns null if invalid. */
 export function normalizePhone(raw: string): string | null {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const digits = trimmed.replace(/\D/g, '');
-  if (digits.length < 8 || digits.length > 15) return null;
-  return `+${digits}`;
+  if (!trimmed.startsWith('+')) return null;
+  const parsed = parsePhoneNumberFromString(trimmed);
+  if (!parsed?.isValid()) return null;
+  return parsed.number;
 }
 
 export function phoneDigits(phone: string): string {

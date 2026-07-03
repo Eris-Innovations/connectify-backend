@@ -30,6 +30,7 @@ import { findDmMongoId, ensureDmConversation } from '../lib/dmConversation';
 import { friendsRouter } from './friends/friends.routes';
 import { areFriends } from './friends/friends.service';
 import { callsRouter } from './calls/calls.routes';
+import { emitToUser } from '../sockets/io';
 
 export const apiRouter = Router();
 
@@ -87,7 +88,8 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
       const unreadCount = await MessageModel.countDocuments({
         conversationId: conv._id,
         senderId: { $ne: userId },
-        readBy: { $ne: userId }
+        readBy: { $ne: userId },
+        $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }]
       });
 
       const avatar = isDm ? otherUser?.avatar : conv.avatar;
@@ -100,7 +102,8 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
           return {
             id: participantUserId,
             name: participantUser?.name ?? 'User',
-            avatar: participantAvatar ? await resolveStoredMediaUrl(participantAvatar) : ''
+            avatar: participantAvatar ? await resolveStoredMediaUrl(participantAvatar) : '',
+            role: p.role === 'admin' || p.role === 'owner' ? 'admin' : 'member'
           };
         })
       );
@@ -111,6 +114,9 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
         name: isDm ? otherUser?.name ?? 'User' : conv.title ?? 'Group',
         avatar: avatarUrl,
         isGroup: conv.type === 'group',
+        description: conv.description ?? '',
+        groupAdmin: conv.type === 'group' ? String(conv.createdBy) : undefined,
+        disappearingMessagesSeconds: conv.disappearingMessagesSeconds ?? 0,
         lastMessage: stripEnc(rawPreview),
         lastMessageTime: conv.lastActivityAt,
         unreadCount,
@@ -170,7 +176,7 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
 });
 
 apiRouter.post('/chats', requireAuth, async (req: AuthedRequest, res) => {
-  const { targetUserId, isSecret } = req.body;
+  const { targetUserId } = req.body;
   if (!targetUserId) return res.status(400).json({ success: false, message: 'targetUserId required' });
   if (!Types.ObjectId.isValid(String(targetUserId))) {
     return res.status(400).json({ success: false, message: 'Invalid targetUserId' });
@@ -269,6 +275,21 @@ apiRouter.post('/chats/group', requireAuth, async (req: AuthedRequest, res) => {
     });
   }
 
+  const existingUsers = await UserModel.countDocuments({ _id: { $in: normalizedParticipants } });
+  if (existingUsers !== normalizedParticipants.length) {
+    return res.status(400).json({ success: false, message: 'One or more selected users do not exist.' });
+  }
+  const friendshipChecks = await Promise.all(
+    normalizedParticipants.map((participantId) => areFriends(req.auth!.userId, participantId))
+  );
+  if (friendshipChecks.some((allowed) => !allowed)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Only accepted friends can be added to a group.',
+      errorCode: 'GROUP_MEMBERS_MUST_BE_FRIENDS'
+    });
+  }
+
   const created = await ConversationModel.create({
     type: 'group',
     title,
@@ -279,7 +300,45 @@ apiRouter.post('/chats/group', requireAuth, async (req: AuthedRequest, res) => {
     ],
     createdBy: req.auth!.userId
   });
-  return res.json({ success: true, data: { id: String(created._id) } });
+  return res.json({
+    success: true,
+    data: {
+      id: String(created._id),
+      name: created.title,
+      description: created.description,
+      isGroup: true,
+      groupAdmin: req.auth!.userId,
+      disappearingMessagesSeconds: 0
+    }
+  });
+});
+
+apiRouter.patch('/chats/:id/disappearing-messages', requireAuth, async (req: AuthedRequest, res) => {
+  const paramId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const allowedSeconds = new Set([0, 3600, 7200, 86400, 604800]);
+  const seconds = Number(req.body?.seconds);
+  if (!paramId || !allowedSeconds.has(seconds)) {
+    return res.status(400).json({ success: false, message: 'Invalid disappearing-message timer.' });
+  }
+  const mongoConvId = await resolveVirtualConversationId(paramId);
+  const conv = await ConversationModel.findById(mongoConvId);
+  if (!conv) return res.status(404).json({ success: false, message: 'Conversation not found.' });
+  const participant = conv.participants.find((p: any) => String(p.userId) === req.auth!.userId);
+  if (!participant) return res.status(403).json({ success: false, message: 'Forbidden' });
+  if (conv.type === 'group' && participant.role !== 'admin' && participant.role !== 'owner') {
+    return res.status(403).json({ success: false, message: 'Only group administrators can change this timer.' });
+  }
+  conv.disappearingMessagesSeconds = seconds;
+  conv.disappearingMessagesUpdatedBy = new Types.ObjectId(req.auth!.userId);
+  conv.disappearingMessagesUpdatedAt = new Date();
+  await conv.save();
+  for (const member of conv.participants) {
+    emitToUser(String(member.userId), 'conversation:settings', {
+      conversationId: paramId,
+      disappearingMessagesSeconds: seconds
+    });
+  }
+  return res.json({ success: true, data: { seconds } });
 });
 
 apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res) => {
@@ -321,22 +380,21 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
 
     const listChatId = paramId.startsWith('dm:') ? paramId : String(mongoConvId);
 
-    const messages = await MessageModel.find({ conversationId: mongoConvId })
+    const requestedLimit = Number(req.query.limit ?? 50);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 50;
+    const before = typeof req.query.before === 'string' ? req.query.before : '';
+    const query: Record<string, unknown> = {
+      conversationId: mongoConvId,
+      $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }]
+    };
+    if (before && Types.ObjectId.isValid(before)) query._id = { $lt: new Types.ObjectId(before) };
+
+    const messages = await MessageModel.find(query)
       .sort({ createdAt: -1 })
-      .limit(50)
+      .limit(limit + 1)
       .lean();
-    const participantIds = conv.participants.map((p: any) => String(p.userId));
-    const visibleMessages =
-      (conv as any).type === 'dm'
-        ? messages.filter((m: any) => {
-            const senderId = String(m.senderId);
-            const receiverId = participantIds.find((pid) => pid !== senderId);
-            if (!receiverId) return true;
-            const readBy = Array.isArray(m.readBy) ? m.readBy.map((id: any) => String(id)) : [];
-            // Keep in DB, hide from chat screen once receiver has read it.
-            return !readBy.includes(receiverId);
-          })
-        : messages;
+    const hasMore = messages.length > limit;
+    const visibleMessages = messages.slice(0, limit);
 
     const stripEnc = (s: string) => (typeof s === 'string' && s.startsWith('ENC:') ? s.slice(4) : s);
 
@@ -356,13 +414,27 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
             }
           : undefined,
         timestamp: m.createdAt,
-        status: 'sent'
+        status: m.readAt ? 'seen' : m.deliveredAt ? 'delivered' : 'sent',
+        readBy: Array.isArray(m.readBy) ? m.readBy.map((id: any) => String(id)) : [],
+        expiresAt: m.expiresAt,
+        replyTo: m.replyTo
+          ? {
+              messageId: String(m.replyTo.messageId),
+              senderId: String(m.replyTo.senderId),
+              previewText: m.replyTo.previewText ?? '',
+              mediaType: m.replyTo.mediaType
+            }
+          : undefined
       }))
     );
 
     return res.json({
       success: true,
-      data
+      data: data.reverse(),
+      pagination: {
+        hasMore,
+        nextCursor: hasMore ? String(visibleMessages[visibleMessages.length - 1]?._id ?? '') : null
+      }
     });
   } catch (error) {
     console.error('Failed to fetch messages', error);

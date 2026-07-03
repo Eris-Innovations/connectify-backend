@@ -72,7 +72,13 @@ const envSchema = z.object({
   /** Comma-separated browser origins allowed to call the API. Native mobile requests usually have no Origin header and still work. */
   ALLOWED_CORS_ORIGINS: optionalTrimmedLoose(),
   /** Optional Expo access token for higher push rate limits (EAS project). */
-  EXPO_ACCESS_TOKEN: optionalTrimmed('EXPO_ACCESS_TOKEN')
+  EXPO_ACCESS_TOKEN: optionalTrimmed('EXPO_ACCESS_TOKEN'),
+  /** Firebase service-account JSON used only by the backend for direct Android call pushes. */
+  FIREBASE_SERVICE_ACCOUNT_JSON: optionalTrimmedLoose(),
+  /** Deployment-friendly alternative to FIREBASE_SERVICE_ACCOUNT_JSON. */
+  FIREBASE_PROJECT_ID: optionalTrimmed('FIREBASE_PROJECT_ID'),
+  FIREBASE_CLIENT_EMAIL: optionalTrimmed('FIREBASE_CLIENT_EMAIL'),
+  FIREBASE_PRIVATE_KEY: optionalTrimmedLoose()
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -1,13 +1,16 @@
+import 'express-async-errors';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import { env } from './config/env';
 import { resolveCorsOrigin } from './config/cors';
 import { apiRouter } from './modules';
+import { errorHandler, requestContext } from './shared/errors';
 
 export function createApp() {
   const app = express();
 
+  app.use(requestContext);
   app.use(helmet());
   app.use(
     cors({
@@ -33,9 +36,14 @@ export function createApp() {
   app.use(env.API_PREFIX, apiRouter);
 
   app.use((_req, res) => {
-    res.status(404).json({ success: false, message: 'Route not found' });
+    res.status(404).json({
+      success: false,
+      message: 'Route not found',
+      errorCode: 'ROUTE_NOT_FOUND',
+      requestId: res.locals.requestId
+    });
   });
+  app.use(errorHandler);
 
   return app;
 }
-

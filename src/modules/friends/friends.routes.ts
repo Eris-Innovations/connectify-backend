@@ -9,27 +9,38 @@ import {
   acceptFriendRequest,
   getFriendRelationship,
   ignoreFriendRequest,
+  listFriends,
   listFriendRequests,
   sendFriendRequest
 } from './friends.service';
+import { asyncHandler } from '../../shared/errors';
 
 export const friendsRouter = Router();
 
-friendsRouter.get('/requests', requireAuth, async (req: AuthedRequest, res) => {
+friendsRouter.get(
+  '/',
+  requireAuth,
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const data = await listFriends(req.auth!.userId);
+    return res.status(StatusCodes.OK).json({ success: true, data });
+  })
+);
+
+friendsRouter.get('/requests', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const data = await listFriendRequests(req.auth!.userId);
   return res.status(StatusCodes.OK).json({ success: true, data });
-});
+}));
 
-friendsRouter.get('/status/:userId', requireAuth, async (req: AuthedRequest, res) => {
+friendsRouter.get('/status/:userId', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const otherUserId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
   if (!otherUserId) {
     return res.status(StatusCodes.BAD_REQUEST).json({ success: false, message: 'userId required' });
   }
   const relationship = await getFriendRelationship(req.auth!.userId, otherUserId);
   return res.status(StatusCodes.OK).json({ success: true, data: relationship });
-});
+}));
 
-friendsRouter.post('/requests', requireAuth, async (req: AuthedRequest, res) => {
+friendsRouter.post('/requests', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const targetUserId = typeof req.body.targetUserId === 'string' ? req.body.targetUserId.trim() : '';
   if (!targetUserId) {
     return res.status(StatusCodes.BAD_REQUEST).json({ success: false, message: 'targetUserId required' });
@@ -47,7 +58,7 @@ friendsRouter.post('/requests', requireAuth, async (req: AuthedRequest, res) => 
 
   if (shouldDeliverPushToUser(targetUserId)) {
     void (async () => {
-      const tokens = await getExpoPushTokensForUser(targetUserId);
+      const tokens = await getExpoPushTokensForUser(targetUserId, { category: 'general' });
       if (tokens.length === 0) {
         console.warn('[push.friend_request] skipped — no tokens', { targetUserId });
         return;
@@ -64,9 +75,9 @@ friendsRouter.post('/requests', requireAuth, async (req: AuthedRequest, res) => 
   }
 
   return res.status(StatusCodes.CREATED).json({ success: true, data: result.data });
-});
+}));
 
-friendsRouter.post('/requests/:id/accept', requireAuth, async (req: AuthedRequest, res) => {
+friendsRouter.post('/requests/:id/accept', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const connectionId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const result = await acceptFriendRequest(connectionId, req.auth!.userId);
   if (!result.ok) {
@@ -84,9 +95,9 @@ friendsRouter.post('/requests/:id/accept', requireAuth, async (req: AuthedReques
     success: true,
     data: { peerUserId: result.data.peerUserId, chatId }
   });
-});
+}));
 
-friendsRouter.post('/requests/:id/ignore', requireAuth, async (req: AuthedRequest, res) => {
+friendsRouter.post('/requests/:id/ignore', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const connectionId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const result = await ignoreFriendRequest(connectionId, req.auth!.userId);
   if (!result.ok) {
@@ -99,4 +110,4 @@ friendsRouter.post('/requests/:id/ignore', requireAuth, async (req: AuthedReques
   });
 
   return res.status(StatusCodes.OK).json({ success: true, data: { peerUserId: result.data.peerUserId } });
-});
+}));

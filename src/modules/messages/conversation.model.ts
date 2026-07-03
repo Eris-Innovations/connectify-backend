@@ -41,6 +41,7 @@ const conversationSchema = new Schema(
       }
     },
     title: { type: String },
+    description: { type: String, default: '' },
     avatar: { type: String },
     lastMessage: { type: lastMessageSchema },
     lastActivityAt: { type: Date, default: () => new Date(), index: true },
@@ -48,6 +49,13 @@ const conversationSchema = new Schema(
     secretExpiresAt: { type: Date },
     isArchived: { type: Boolean, default: false, index: true },
     isPinned: { type: Boolean, default: false },
+    disappearingMessagesSeconds: {
+      type: Number,
+      enum: [0, 3600, 7200, 86400, 604800],
+      default: 0
+    },
+    disappearingMessagesUpdatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    disappearingMessagesUpdatedAt: { type: Date },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true }
   },
   {

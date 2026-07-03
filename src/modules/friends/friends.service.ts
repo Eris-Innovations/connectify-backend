@@ -88,6 +88,25 @@ export async function listFriendRequests(userId: string) {
   return { incoming, outgoing, incomingCount: incoming.length };
 }
 
+export async function listFriends(userId: string) {
+  const rows = await FriendConnectionModel.find({
+    status: 'accepted',
+    $or: [{ userLow: userId }, { userHigh: userId }]
+  })
+    .sort({ respondedAt: -1, updatedAt: -1 })
+    .limit(500)
+    .lean();
+
+  const summaries = await Promise.all(
+    rows.map((row) => {
+      const low = String(row.userLow);
+      const high = String(row.userHigh);
+      return formatUserSummary(low === userId ? high : low);
+    })
+  );
+  return summaries.filter((user): user is NonNullable<typeof user> => Boolean(user));
+}
+
 export async function sendFriendRequest(
   fromUserId: string,
   targetUserId: string

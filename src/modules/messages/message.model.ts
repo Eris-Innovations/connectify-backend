@@ -1,5 +1,15 @@
 import { InferSchemaType, Schema, model } from 'mongoose';
 
+const replySnapshotSchema = new Schema(
+  {
+    messageId: { type: Schema.Types.ObjectId, ref: 'Message', required: true },
+    senderId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    previewText: { type: String, default: '' },
+    mediaType: { type: String, enum: ['text', 'image', 'video', 'file', 'voice'] }
+  },
+  { _id: false }
+);
+
 const messageSchema = new Schema(
   {
     conversationId: { type: Schema.Types.ObjectId, ref: 'Conversation', required: true, index: true },
@@ -25,6 +35,7 @@ const messageSchema = new Schema(
     readBy: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     isSecret: { type: Boolean, default: false, index: true },
     isEncrypted: { type: Boolean, default: false },
+    replyTo: { type: replySnapshotSchema },
     expiresAt: { type: Date }
   },
   {
@@ -41,4 +52,3 @@ messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 export type MessageDocument = InferSchemaType<typeof messageSchema> & { _id: string };
 export const MessageModel = model('Message', messageSchema);
-

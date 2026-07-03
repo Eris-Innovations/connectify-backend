@@ -11,6 +11,8 @@ export const updateMeSchema = z.object({
       .object({
         privacy: z.enum(['public', 'private']).optional(),
         notificationsEnabled: z.boolean().optional(),
+        messageNotificationsEnabled: z.boolean().optional(),
+        callNotificationsEnabled: z.boolean().optional(),
         readReceiptsEnabled: z.boolean().optional(),
         showLastSeen: z.boolean().optional(),
         theme: z.enum(['system', 'light', 'dark']).optional()

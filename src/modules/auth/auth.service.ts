@@ -89,7 +89,11 @@ export async function registerUser(input: RegisterInput) {
   if (!normalizedPhone) {
     return {
       status: StatusCodes.BAD_REQUEST,
-      body: { success: false, message: 'Enter a valid phone number with country code (e.g. +923001234567).' }
+      body: {
+        success: false,
+        message: 'Enter a valid phone number with country code (for example, +923001234567).',
+        errorCode: 'INVALID_PHONE'
+      }
     };
   }
 
@@ -101,13 +105,32 @@ export async function registerUser(input: RegisterInput) {
   }).lean();
 
   if (existing) {
-    let message = 'Email or username already exists';
-    if (existing.phone === normalizedPhone) message = 'This phone number is already registered';
-    else if (existing.email === emailLower) message = 'This email is already registered';
-    else if (existing.username === usernameLower) message = 'This username is already taken';
+    if (!existing.isVerified && existing.email === emailLower && existing.phone === normalizedPhone) {
+      return {
+        status: StatusCodes.CONFLICT,
+        body: {
+          success: false,
+          message: 'This account is waiting for email verification.',
+          errorCode: 'ACCOUNT_PENDING_VERIFICATION',
+          data: { userId: String(existing._id), email: existing.email }
+        }
+      };
+    }
+    let message = 'This account information is already in use.';
+    let errorCode = 'ACCOUNT_ALREADY_EXISTS';
+    if (existing.phone === normalizedPhone) {
+      message = 'This phone number is already registered.';
+      errorCode = 'PHONE_ALREADY_REGISTERED';
+    } else if (existing.email === emailLower) {
+      message = 'This email is already registered.';
+      errorCode = 'EMAIL_ALREADY_REGISTERED';
+    } else if (existing.username === usernameLower) {
+      message = 'This username is already taken.';
+      errorCode = 'USERNAME_ALREADY_TAKEN';
+    }
     return {
       status: StatusCodes.CONFLICT,
-      body: { success: false, message }
+      body: { success: false, message, errorCode }
     };
   }
 
@@ -167,12 +190,30 @@ export async function registerUser(input: RegisterInput) {
 }
 
 export async function resendSignupOtp(userId: string) {
+  const cooldownKey = `auth:signup-otp-cooldown:${userId}`;
+  try {
+    const coolingDown = await redis.get(cooldownKey);
+    if (coolingDown) {
+      return {
+        status: StatusCodes.TOO_MANY_REQUESTS,
+        body: { success: false, message: 'Please wait before requesting another code.', errorCode: 'OTP_RATE_LIMITED' }
+      };
+    }
+  } catch {
+    // Redis is optional; email delivery still works without rate-limit storage.
+  }
   const user = await UserModel.findById(userId);
   if (!user) {
     return { status: StatusCodes.NOT_FOUND, body: { success: false, message: 'User not found' } };
   }
   if (user.isVerified) {
     return { status: StatusCodes.BAD_REQUEST, body: { success: false, message: 'This account is already verified' } };
+  }
+
+  try {
+    await redis.set(cooldownKey, '1', 'EX', 60);
+  } catch {
+    // Best-effort cooldown.
   }
 
   const code = sixDigitOtp();
@@ -238,7 +279,10 @@ export async function verifyOtp(userId: string, code: string) {
   });
 
   if (!otp) {
-    return { status: StatusCodes.BAD_REQUEST, body: { success: false, message: 'Invalid or expired OTP' } };
+    return {
+      status: StatusCodes.BAD_REQUEST,
+      body: { success: false, message: 'The verification code is invalid or expired.', errorCode: 'OTP_INVALID_OR_EXPIRED' }
+    };
   }
 
   otp.used = true;
@@ -283,19 +327,21 @@ export async function verifyOtp(userId: string, code: string) {
 export async function loginUser(input: LoginInput) {
   const user = await UserModel.findOne({ email: input.email.toLowerCase() });
   if (!user) {
-    return { status: StatusCodes.UNAUTHORIZED, body: { success: false, message: 'Invalid credentials' } };
+    return { status: StatusCodes.UNAUTHORIZED, body: { success: false, message: 'Email or password is incorrect.', errorCode: 'INVALID_CREDENTIALS' } };
   }
 
   const valid = await bcrypt.compare(input.password, user.passwordHash);
   if (!valid) {
-    return { status: StatusCodes.UNAUTHORIZED, body: { success: false, message: 'Invalid credentials' } };
+    return { status: StatusCodes.UNAUTHORIZED, body: { success: false, message: 'Email or password is incorrect.', errorCode: 'INVALID_CREDENTIALS' } };
   }
   if (!user.isVerified) {
     return {
       status: StatusCodes.FORBIDDEN,
       body: {
         success: false,
-        message: 'Please verify your email before signing in. Use the code we sent you, or request a new code from the signup screen.'
+        message: 'Please verify your email before signing in.',
+        errorCode: 'EMAIL_NOT_VERIFIED',
+        data: { userId: String(user._id), email: user.email }
       }
     };
   }
@@ -469,4 +515,3 @@ export async function resetPassword(email: string, code: string, newPassword: st
 
   return { status: StatusCodes.OK, body: { success: true, message: 'Password reset successful' } };
 }
-

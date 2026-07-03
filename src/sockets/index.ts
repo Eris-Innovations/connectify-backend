@@ -13,7 +13,12 @@ import { getDmPeerUserId } from '../lib/dmConversation';
 import { areFriends } from '../modules/friends/friends.service';
 import { scheduleVoiceMessageTranscription } from '../modules/ai/whisper.service';
 import { resolveStoredMediaUrl } from '../lib/r2';
-import { sendIncomingCallPush, getExpoPushTokensForUser, sendChatMessagePush } from '../lib/expoPush';
+import {
+  sendAndroidIncomingCallPush,
+  sendIncomingCallPush,
+  getExpoPushTokensForUser,
+  sendChatMessagePush
+} from '../lib/expoPush';
 import { clearPendingCall, clearPendingCallByCaller, getPendingCall, storePendingCall } from '../modules/calls/pending-call.service';
 import {
   clearActiveCall,
@@ -223,6 +228,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
         mediaUrl?: string;
         mediaType?: string;
         mediaMetadata?: { durationSec?: number; name?: string; size?: number };
+        replyToMessageId?: string;
       }) => {
         const now = new Date();
         const senderId = userId;
@@ -260,13 +266,35 @@ export function createSocketServer(httpServer: HttpServer): Server {
         const dbConversationId = await resolveConversationForMember(senderId, rawConv);
         if (!dbConversationId) return;
 
-        const convMeta = await ConversationModel.findById(dbConversationId).select('type').lean();
+        const convMeta = await ConversationModel.findById(dbConversationId)
+          .select('type title disappearingMessagesSeconds')
+          .lean();
         if (convMeta?.type === 'dm') {
           const peerId = await getDmPeerUserId(dbConversationId, senderId);
           if (!peerId || !(await areFriends(senderId, peerId))) {
             return;
           }
         }
+
+        let replyTo:
+          | { messageId: Types.ObjectId; senderId: Types.ObjectId; previewText: string; mediaType?: string }
+          | undefined;
+        const replyId = typeof payload.replyToMessageId === 'string' ? payload.replyToMessageId.trim() : '';
+        if (replyId && Types.ObjectId.isValid(replyId)) {
+          const referenced = await MessageModel.findOne({ _id: replyId, conversationId: dbConversationId }).lean();
+          if (referenced) {
+            replyTo = {
+              messageId: referenced._id,
+              senderId: referenced.senderId,
+              previewText: String(referenced.content?.text ?? '').slice(0, 160),
+              mediaType: referenced.content?.mediaType
+            };
+          }
+        }
+        const disappearingSeconds = Number(convMeta?.disappearingMessagesSeconds ?? 0);
+        const expiresAt = disappearingSeconds > 0
+          ? new Date(now.getTime() + disappearingSeconds * 1000)
+          : undefined;
 
         const created = await MessageModel.create({
           conversationId: dbConversationId,
@@ -277,7 +305,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
             mediaType: mediaUrl ? mediaType : 'text',
             metadata: metadataForDb
           },
-          type: 'message'
+          type: 'message',
+          replyTo,
+          expiresAt
         });
 
         if (mediaType === 'voice' && mediaUrl) {
@@ -337,8 +367,19 @@ export function createSocketServer(httpServer: HttpServer): Server {
               }
             : undefined,
           createdAt: created.createdAt.toISOString(),
+          expiresAt: created.expiresAt?.toISOString(),
+          replyTo: created.replyTo
+            ? {
+                messageId: String(created.replyTo.messageId),
+                senderId: String(created.replyTo.senderId),
+                previewText: created.replyTo.previewText,
+                mediaType: created.replyTo.mediaType
+              }
+            : undefined,
           clientId: payload.clientId,
-          senderPreview
+          senderPreview,
+          conversationType: convMeta?.type,
+          conversationTitle: convMeta?.title
         };
 
         socket.emit('message:ack', {
@@ -431,7 +472,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
         if (!dbConversationId) return;
 
         const conv = await ConversationModel.findById(dbConversationId).select('type participants').lean();
-        if (!conv || conv.type !== 'dm' || !Array.isArray(conv.participants) || conv.participants.length < 2) {
+        if (!conv || !Array.isArray(conv.participants) || conv.participants.length < 2) {
           return;
         }
 
@@ -590,7 +631,16 @@ export function createSocketServer(httpServer: HttpServer): Server {
         }
 
         try {
-          const tokens = await getExpoPushTokensForUser(receiverId);
+          const fcmDelivered = await sendAndroidIncomingCallPush(receiverId, {
+            callId: pending.callId,
+            callerId,
+            callerName: payload.callerName ?? 'Unknown',
+            isVideo
+          });
+          const tokens = await getExpoPushTokensForUser(
+            receiverId,
+            fcmDelivered > 0 ? { category: 'call', platform: 'ios' } : { category: 'call' }
+          );
           if (tokens.length > 0) {
             console.log('[push.call] sending', {
               receiverId,
@@ -604,7 +654,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
               callerName: payload.callerName ?? 'Unknown',
               isVideo,
             });
-          } else {
+          } else if (fcmDelivered === 0) {
             console.warn('[push.call] skipped — no tokens', { receiverId, callId: pending.callId, socketsInRoom });
           }
         } catch (err) {

@@ -11,7 +11,8 @@
     "lint": "eslint \"src/**/*.ts\"",
     "test": "vitest run",
     "cors:from-mobile": "node scripts/print-mobile-cors-origin.cjs",
-    "seed:admin": "node --import tsx scripts/seed-admin.ts"
+    "seed:admin": "node --import tsx scripts/seed-admin.ts",
+    "audit:phones": "node --import tsx scripts/audit-phone-normalization.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1031.0",
@@ -25,10 +26,13 @@
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
+    "express-async-errors": "^3.1.1",
     "helmet": "^8.1.0",
     "http-status-codes": "^2.3.0",
     "ioredis": "^5.8.1",
     "jsonwebtoken": "^9.0.2",
+    "libphonenumber-js": "^1.12.29",
+    "firebase-admin": "^13.6.0",
     "mongoose": "^8.19.1",
     "multer": "^2.1.1",
     "resend": "^6.12.0",

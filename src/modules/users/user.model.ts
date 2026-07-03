@@ -11,6 +11,14 @@ const userSettingsSchema = new Schema(
       type: Boolean,
       default: true
     },
+    messageNotificationsEnabled: {
+      type: Boolean,
+      default: true
+    },
+    callNotificationsEnabled: {
+      type: Boolean,
+      default: true
+    },
     readReceiptsEnabled: {
       type: Boolean,
       default: true
