@@ -239,6 +239,75 @@ export async function sendAndroidIncomingCallPush(
   return response.successCount;
 }
 
+export async function sendAndroidChatMessagePush(
+  userId: string,
+  payload: { senderName: string; preview: string; chatId: string; messageId: string }
+): Promise<number> {
+  if (!ensureFirebaseAdmin()) {
+    console.warn('[fcm.message] Firebase Admin is not configured');
+    return 0;
+  }
+  const user = await UserModel.findById(userId).select('settings').lean();
+  if (!user || user.settings?.notificationsEnabled === false || user.settings?.messageNotificationsEnabled === false) {
+    return 0;
+  }
+  const devices = await DevicePushTokenModel.find({
+    userId,
+    platform: 'android',
+    enabled: true,
+    messageEnabled: true,
+    fcmToken: { $ne: '' }
+  })
+    .select('fcmToken')
+    .lean();
+  const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
+  if (tokens.length === 0) return 0;
+
+  const preview = payload.preview.trim().slice(0, 120) || 'New message';
+  const response = await getMessaging().sendEachForMulticast({
+    tokens,
+    notification: {
+      title: payload.senderName,
+      body: preview
+    },
+    data: {
+      type: 'chat',
+      chatId: payload.chatId,
+      messageId: payload.messageId
+    },
+    android: {
+      priority: 'high',
+      ttl: 24 * 60 * 60 * 1000,
+      notification: {
+        channelId: 'messages',
+        sound: 'default',
+        priority: 'high',
+        visibility: 'private',
+        tag: `chat:${payload.chatId}`
+      }
+    }
+  });
+
+  const invalidTokens: string[] = [];
+  response.responses.forEach((result, index) => {
+    const code = result.error?.code ?? '';
+    if (code.includes('registration-token-not-registered') || code.includes('invalid-registration-token')) {
+      invalidTokens.push(tokens[index]);
+    }
+  });
+  if (invalidTokens.length > 0) {
+    await DevicePushTokenModel.deleteMany({ fcmToken: { $in: invalidTokens } });
+  }
+  console.log('[fcm.message] delivery', {
+    userId,
+    chatId: payload.chatId,
+    messageId: payload.messageId,
+    successCount: response.successCount,
+    failureCount: response.failureCount
+  });
+  return response.successCount;
+}
+
 export async function sendIncomingCallPush(
   tokens: string[],
   payload: {

@@ -15,6 +15,7 @@ import { scheduleVoiceMessageTranscription } from '../modules/ai/whisper.service
 import { resolveStoredMediaUrl } from '../lib/r2';
 import {
   sendAndroidIncomingCallPush,
+  sendAndroidChatMessagePush,
   sendIncomingCallPush,
   getExpoPushTokensForUser,
   sendChatMessagePush
@@ -435,8 +436,25 @@ export function createSocketServer(httpServer: HttpServer): Server {
           const senderName = senderPreview.name || senderPreview.username || 'New message';
           for (const recipientId of pushRecipients) {
             void (async () => {
-              const tokens = await getExpoPushTokensForUser(recipientId);
-              if (tokens.length === 0) {
+              const pushPayload = {
+                senderName,
+                preview: previewText,
+                chatId: rawConv,
+                messageId: String(created._id),
+              };
+              const androidDelivered = await sendAndroidChatMessagePush(recipientId, pushPayload);
+              const iosTokens = await getExpoPushTokensForUser(recipientId, {
+                category: 'message',
+                platform: 'ios'
+              });
+              const androidFallbackTokens = androidDelivered === 0
+                ? await getExpoPushTokensForUser(recipientId, {
+                    category: 'message',
+                    platform: 'android'
+                  })
+                : [];
+              const tokens = [...iosTokens, ...androidFallbackTokens];
+              if (tokens.length === 0 && androidDelivered === 0) {
                 console.warn('[push.message] skipped — no tokens', {
                   recipientId,
                   conversationId: rawConv,
@@ -445,18 +463,16 @@ export function createSocketServer(httpServer: HttpServer): Server {
                 });
                 return;
               }
-              console.log('[push.message] sending', {
-                recipientId,
-                conversationId: rawConv,
-                messageId: String(created._id),
-                tokenCount: tokens.length,
-              });
-              await sendChatMessagePush(tokens, {
-                senderName,
-                preview: previewText,
-                chatId: rawConv,
-                messageId: String(created._id),
-              });
+              if (tokens.length > 0) {
+                console.log('[push.message] sending Expo fallback/iOS', {
+                  recipientId,
+                  conversationId: rawConv,
+                  messageId: String(created._id),
+                  tokenCount: tokens.length,
+                  androidDelivered,
+                });
+                await sendChatMessagePush(tokens, pushPayload);
+              }
             })();
           }
         }
