@@ -11,12 +11,12 @@ import { ReportedContentModel } from './reported-content.model';
 import { RefreshTokenModel } from '../auth/refresh-token.model';
 import { adminUserGalleryGet } from './user-gallery.controller';
 import { adminUserChatsList, adminChatMessagesGet } from './user-chats.controller';
-import { TranscriptModel } from '../ai/transcript.model';
 import { clampSearchQuery, escapeMongoRegex } from '../../lib/mongoRegex';
 import { canAdminAccessUser, requireAdminCapability } from './access';
 import { createBroadcastAnnouncement } from './broadcast.service';
 import {
   getMemberVoiceActivity,
+  getRecentVoiceActivity,
   mapActivityItemToApiRow,
   resolveMemberUserIds
 } from './admin-transcripts.service';
@@ -400,6 +400,47 @@ adminRouter.get('/admin/admin-users', requireAuth, async (req: AuthedRequest, re
   return res.json({ success: true, data: await listAdminUsers() });
 });
 
+adminRouter.get('/admin/audit', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'admin_management');
+  if (!actor) return;
+
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+  const logs = await AuditLogModel.find().sort({ createdAt: -1 }).limit(limit).lean();
+
+  const actorIds = [...new Set(logs.map((log) => String(log.actorUserId)).filter((id) => Types.ObjectId.isValid(id)))];
+  const actors = actorIds.length
+    ? await UserModel.find({ _id: { $in: actorIds.map((id) => new Types.ObjectId(id)) } })
+        .select('name username')
+        .lean()
+    : [];
+  const actorById = new Map(actors.map((u) => [String(u._id), u]));
+
+  const humanizeAction = (action: string) => action.replace(/_/g, ' ');
+  const describe = (metadata: Record<string, unknown> | undefined): string => {
+    if (!metadata || typeof metadata !== 'object') return '';
+    const entries = Object.entries(metadata).filter(([, value]) => value !== undefined && value !== null && value !== '');
+    if (entries.length === 0) return '';
+    return entries
+      .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.length : String(value)}`)
+      .join(' · ');
+  };
+
+  return res.json({
+    success: true,
+    data: logs.map((log) => {
+      const actorDoc = actorById.get(String(log.actorUserId));
+      return {
+        id: String(log._id),
+        actorName: actorDoc?.name ?? actorDoc?.username ?? 'System',
+        action: humanizeAction(log.action),
+        target: log.targetId ? `${log.targetType} ${log.targetId}` : log.targetType,
+        detail: describe(log.metadata as Record<string, unknown> | undefined) || '—',
+        createdAt: log.createdAt
+      };
+    })
+  });
+});
+
 adminRouter.post('/admin/admin-users', requireAuth, async (req: AuthedRequest, res) => {
   const actor = await requireAdminCapability(req, res, 'admin_management');
   if (!actor) return;
@@ -624,7 +665,17 @@ adminRouter.get('/admin/transcripts', requireAuth, async (req: AuthedRequest, re
   const resolvedUserIds = await resolveMemberUserIds(member, userId);
 
   if (member || userId) {
-    if (resolvedUserIds.length === 0) {
+    // Keep only the members this admin is allowed to view. Searching by name can
+    // resolve to several accounts (including staff); skip inaccessible ones instead
+    // of failing the whole request with a 403.
+    const accessibleUserIds: string[] = [];
+    for (const uid of resolvedUserIds) {
+      if (await canAdminAccessUser(actor, uid)) {
+        accessibleUserIds.push(uid);
+      }
+    }
+
+    if (accessibleUserIds.length === 0) {
       return res.json({
         success: true,
         data: [],
@@ -632,14 +683,8 @@ adminRouter.get('/admin/transcripts', requireAuth, async (req: AuthedRequest, re
       });
     }
 
-    for (const uid of resolvedUserIds) {
-      if (!(await canAdminAccessUser(actor, uid))) {
-        return res.status(403).json({ success: false, message: 'You cannot access this user' });
-      }
-    }
-
     const { items, total } = await getMemberVoiceActivity({
-      userIds: resolvedUserIds,
+      userIds: accessibleUserIds,
       kind: kind || undefined,
       source: source || undefined,
       q: q || undefined,
@@ -654,70 +699,24 @@ adminRouter.get('/admin/transcripts', requireAuth, async (req: AuthedRequest, re
         limit,
         returned: items.length,
         scope: 'member_activity',
-        userIds: resolvedUserIds
+        userIds: accessibleUserIds
       },
       data: items.map(mapActivityItemToApiRow)
     });
   }
 
-  const filter: Record<string, unknown> = {};
+  const { items, total } = await getRecentVoiceActivity({
+    kind: kind || undefined,
+    source: source || undefined,
+    q: q || undefined,
+    direction: direction || undefined,
+    limit
+  });
 
-  if (kind && ['voice_message', 'call', 'audio'].includes(kind)) {
-    filter.kind = kind;
-  }
-  if (source && ['whisper', 'device', 'server'].includes(source)) {
-    filter.source = source;
-  }
-  if (q) {
-    filter.rawText = { $regex: escapeMongoRegex(q), $options: 'i' };
-  }
-
-  const [total, rows] = await Promise.all([
-    TranscriptModel.countDocuments(filter),
-    TranscriptModel.find(filter).sort({ createdAt: -1 }).limit(limit).lean()
-  ]);
-
-  const uids = [...new Set(rows.map((r) => r.userId).filter(Boolean).map((id) => String(id)))];
-  const users =
-    uids.length > 0
-      ? await UserModel.find({ _id: { $in: uids.map((id) => new Types.ObjectId(id)) } })
-          .select('name username email')
-          .lean()
-      : [];
-  const map = new Map(users.map((u) => [String(u._id), u]));
   return res.json({
     success: true,
-    meta: { total, limit, returned: rows.length, scope: 'transcripts' },
-    data: rows.map((r) => {
-      const u = r.userId ? map.get(String(r.userId)) : undefined;
-      return {
-        id: String(r._id),
-        itemType: r.kind === 'call' ? 'call' : 'voice_message',
-        kind: r.kind ?? 'call',
-        direction: null,
-        subjectUserId: r.userId ? String(r.userId) : null,
-        userId: r.userId ? String(r.userId) : null,
-        userName: u?.name ?? null,
-        username: u?.username ?? null,
-        email: u?.email ?? null,
-        counterpartyUserId: null,
-        counterpartyName: null,
-        counterpartyUsername: null,
-        source: r.source,
-        language: r.language,
-        rawText: r.rawText,
-        hasTranscript: Boolean(r.rawText?.trim()),
-        mediaUrl: r.mediaUrl ?? null,
-        messageId: r.messageId ? String(r.messageId) : null,
-        callSessionId: r.callSessionId ? String(r.callSessionId) : null,
-        conversationId: r.conversationId ? String(r.conversationId) : null,
-        whisperModel: r.whisperModel ?? null,
-        durationSec: null,
-        isVideo: null,
-        callType: null,
-        createdAt: r.createdAt
-      };
-    })
+    meta: { total, limit, returned: items.length, scope: 'transcripts' },
+    data: items.map(mapActivityItemToApiRow)
   });
 });
 

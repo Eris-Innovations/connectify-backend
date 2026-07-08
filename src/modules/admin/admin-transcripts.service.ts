@@ -307,6 +307,151 @@ export async function getMemberVoiceActivity(
   };
 }
 
+/**
+ * Recent voice-note and call activity across ALL users (no member filter).
+ * Used by the Whisper panel default view so admins always see real user data,
+ * not just rows that already have an AI transcript document.
+ */
+export async function getRecentVoiceActivity(filters: {
+  kind?: string;
+  source?: string;
+  q?: string;
+  direction?: string;
+  limit: number;
+}): Promise<{ items: AdminMemberActivityItem[]; total: number }> {
+  const scanLimit = 500;
+
+  const [voiceMessages, calls] = await Promise.all([
+    MessageModel.find({ 'content.mediaType': 'voice' })
+      .sort({ createdAt: -1 })
+      .limit(scanLimit)
+      .lean(),
+    CallModel.find({})
+      .sort({ createdAt: -1 })
+      .limit(scanLimit)
+      .lean()
+  ]);
+
+  const messageIds = voiceMessages.map((m) => m._id);
+  const callIds = calls.map((c) => c._id);
+
+  const orClauses: Record<string, unknown>[] = [];
+  if (messageIds.length) orClauses.push({ messageId: { $in: messageIds } });
+  if (callIds.length) orClauses.push({ callSessionId: { $in: callIds } });
+  const transcripts = orClauses.length > 0 ? await TranscriptModel.find({ $or: orClauses }).lean() : [];
+
+  const transcriptByMessageId = new Map(
+    transcripts.filter((t) => t.messageId).map((t) => [String(t.messageId), t])
+  );
+  const transcriptByCallId = new Map(
+    transcripts.filter((t) => t.callSessionId).map((t) => [String(t.callSessionId), t])
+  );
+
+  const userIdCollector = new Set<string>();
+  for (const m of voiceMessages) userIdCollector.add(String(m.senderId));
+  for (const c of calls) {
+    userIdCollector.add(String(c.callerId));
+    userIdCollector.add(String(c.receiverId));
+  }
+
+  const users =
+    userIdCollector.size > 0
+      ? await UserModel.find({ _id: { $in: [...userIdCollector].map((id) => new Types.ObjectId(id)) } })
+          .select('name username email')
+          .lean()
+      : [];
+  const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+  const userBrief = (id: string | null | undefined) => {
+    if (!id) return { userId: null, userName: null, username: null, email: null };
+    const u = userMap.get(id);
+    return {
+      userId: id,
+      userName: u?.name ?? null,
+      username: u?.username ?? null,
+      email: u?.email ?? null
+    };
+  };
+
+  const items: AdminMemberActivityItem[] = [];
+
+  for (const message of voiceMessages) {
+    const subjectUserId = String(message.senderId);
+    const transcript = transcriptByMessageId.get(String(message._id));
+    items.push({
+      id: transcript ? String(transcript._id) : `voice:${String(message._id)}`,
+      itemType: 'voice_message',
+      kind: 'voice_message',
+      direction: 'sent',
+      subjectUserId,
+      ...userBrief(subjectUserId),
+      counterpartyUserId: null,
+      counterpartyName: null,
+      counterpartyUsername: null,
+      source: transcript?.source ?? '',
+      language: transcript?.language ?? 'auto',
+      rawText: transcript?.rawText ?? '',
+      hasTranscript: Boolean(transcript?.rawText?.trim()),
+      mediaUrl: message.content?.mediaUrl ? await resolveStoredMediaUrl(message.content.mediaUrl) : null,
+      messageId: String(message._id),
+      callSessionId: null,
+      conversationId: message.conversationId ? String(message.conversationId) : null,
+      whisperModel: transcript?.whisperModel ?? null,
+      durationSec:
+        typeof message.content?.metadata?.durationSec === 'number' ? message.content.metadata.durationSec : null,
+      isVideo: null,
+      callType: null,
+      createdAt: message.createdAt
+    });
+  }
+
+  for (const call of calls) {
+    const callerId = String(call.callerId);
+    const transcript = transcriptByCallId.get(String(call._id));
+    const cp = userBrief(String(call.receiverId));
+    const recordingUrl = call.recordingUrl?.trim() || transcript?.mediaUrl || '';
+    items.push({
+      id: transcript ? String(transcript._id) : `call:${String(call._id)}`,
+      itemType: 'call',
+      kind: 'call',
+      direction: 'outgoing',
+      subjectUserId: callerId,
+      ...userBrief(callerId),
+      counterpartyUserId: cp.userId,
+      counterpartyName: cp.userName,
+      counterpartyUsername: cp.username,
+      source: transcript?.source ?? '',
+      language: transcript?.language ?? 'auto',
+      rawText: transcript?.rawText ?? '',
+      hasTranscript: Boolean(transcript?.rawText?.trim()),
+      mediaUrl: recordingUrl ? await resolveStoredMediaUrl(recordingUrl) : null,
+      messageId: null,
+      callSessionId: String(call._id),
+      conversationId: null,
+      whisperModel: transcript?.whisperModel ?? null,
+      durationSec: typeof call.duration === 'number' ? call.duration : null,
+      isVideo: Boolean(call.isVideo),
+      callType: call.type,
+      createdAt: call.createdAt
+    });
+  }
+
+  items.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+  const filtered = items.filter((item) => {
+    if (!matchesKind(item.kind, filters.kind)) return false;
+    if (!matchesDirection(item.direction, filters.direction)) return false;
+    if (!matchesSource(item.hasTranscript, item.source, filters.source)) return false;
+    if (!matchesText(item.rawText, filters.q)) return false;
+    return true;
+  });
+
+  return {
+    total: filtered.length,
+    items: filtered.slice(0, filters.limit)
+  };
+}
+
 export function mapActivityItemToApiRow(item: AdminMemberActivityItem) {
   return {
     id: item.id,
@@ -350,6 +495,7 @@ export async function resolveMemberUserIds(member: string, userId: string): Prom
 
   const literal = escapeMongoRegex(member.trim());
   const matchedUsers = await UserModel.find({
+    role: 'user',
     $or: [
       { name: { $regex: literal, $options: 'i' } },
       { username: { $regex: literal, $options: 'i' } },
@@ -357,7 +503,7 @@ export async function resolveMemberUserIds(member: string, userId: string): Prom
     ]
   })
     .select('_id')
-    .limit(20)
+    .limit(50)
     .lean();
 
   return matchedUsers.map((u) => String(u._id));

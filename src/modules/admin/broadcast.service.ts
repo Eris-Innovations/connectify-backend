@@ -69,7 +69,12 @@ export async function dispatchBroadcastAnnouncement(announcementId: string): Pro
         to: token,
         title: announcement.title,
         body: announcement.body,
-        data: { type: 'announcement', announcementId },
+        data: {
+          type: 'announcement',
+          announcementId,
+          title: announcement.title,
+          body: announcement.body
+        },
         sound: 'default',
         priority: 'high'
       })));
