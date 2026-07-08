@@ -31,6 +31,9 @@ import { friendsRouter } from './friends/friends.routes';
 import { areFriends } from './friends/friends.service';
 import { callsRouter } from './calls/calls.routes';
 import { emitToUser } from '../sockets/io';
+import { scheduleCallTranscription } from './ai/whisper.service';
+import { hasActiveConsent } from './compliance/consent.service';
+import { CONSENT_PURPOSES } from './compliance/consent.constants';
 
 export const apiRouter = Router();
 
@@ -396,6 +399,21 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
     const hasMore = messages.length > limit;
     const visibleMessages = messages.slice(0, limit);
 
+    const voiceMessageIds = visibleMessages
+      .filter((m) => m.content?.mediaType === 'voice')
+      .map((m) => m._id);
+
+    const transcripts =
+      voiceMessageIds.length > 0
+        ? await TranscriptModel.find({
+            messageId: { $in: voiceMessageIds },
+            source: 'whisper'
+          })
+            .select('messageId rawText')
+            .lean()
+        : [];
+    const transcriptByMessageId = new Map(transcripts.map((t) => [String(t.messageId), t.rawText]));
+
     const stripEnc = (s: string) => (typeof s === 'string' && s.startsWith('ENC:') ? s.slice(4) : s);
 
     const data = await Promise.all(
@@ -410,7 +428,9 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
               uri: await resolveStoredMediaUrl(m.content.mediaUrl),
               duration: m.content.metadata?.durationSec,
               name: m.content.metadata?.name,
-              size: m.content.metadata?.size
+              size: m.content.metadata?.size,
+              transcription:
+                m.content.mediaType === 'voice' ? transcriptByMessageId.get(String(m._id)) : undefined
             }
           : undefined,
         timestamp: m.createdAt,
@@ -566,6 +586,95 @@ apiRouter.post('/calls/:id/transcript', requireAuth, async (req: AuthedRequest, 
   return res.status(201).json({ success: true, data: created });
 });
 
+apiRouter.post('/calls/:id/recording', requireAuth, async (req: AuthedRequest, res) => {
+  const callSessionId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const recordingUrl = typeof req.body.recordingUrl === 'string' ? req.body.recordingUrl.trim() : '';
+  const duration = typeof req.body.duration === 'number' ? Math.max(0, Math.floor(req.body.duration)) : undefined;
+
+  if (!callSessionId || !Types.ObjectId.isValid(callSessionId)) {
+    return res.status(400).json({ success: false, message: 'Invalid call id' });
+  }
+  if (!recordingUrl) {
+    return res.status(400).json({ success: false, message: 'recordingUrl is required' });
+  }
+
+  const call = await CallModel.findById(callSessionId);
+  if (!call) {
+    return res.status(404).json({ success: false, message: 'Call not found' });
+  }
+
+  const userId = req.auth!.userId;
+  const isParticipant = String(call.callerId) === userId || String(call.receiverId) === userId;
+  if (!isParticipant) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
+  const consented = await hasActiveConsent(userId, CONSENT_PURPOSES.CALL_TRANSCRIPTION);
+  if (!consented) {
+    return res.status(403).json({
+      success: false,
+      message: 'Call transcription consent is required before uploading a recording.'
+    });
+  }
+
+  call.recordingUrl = recordingUrl.slice(0, 2000);
+  call.recordingUploadedBy = new Types.ObjectId(userId);
+  if (duration != null) call.duration = duration;
+  await call.save();
+
+  scheduleCallTranscription({
+    userId,
+    mediaUrl: recordingUrl,
+    callSessionId
+  });
+
+  return res.status(202).json({
+    success: true,
+    data: {
+      id: String(call._id),
+      recordingUrl: call.recordingUrl,
+      transcriptionStatus: 'processing'
+    }
+  });
+});
+
+apiRouter.get('/calls/:id/transcript', requireAuth, async (req: AuthedRequest, res) => {
+  const callSessionId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!callSessionId || !Types.ObjectId.isValid(callSessionId)) {
+    return res.status(400).json({ success: false, message: 'Invalid call id' });
+  }
+
+  const call = await CallModel.findById(callSessionId).lean();
+  if (!call) {
+    return res.status(404).json({ success: false, message: 'Call not found' });
+  }
+
+  const userId = req.auth!.userId;
+  const isParticipant = String(call.callerId) === userId || String(call.receiverId) === userId;
+  if (!isParticipant) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
+  const transcript = await TranscriptModel.findOne({ callSessionId: new Types.ObjectId(callSessionId) })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (!transcript) {
+    return res.json({ success: true, data: null });
+  }
+
+  return res.json({
+    success: true,
+    data: {
+      id: String(transcript._id),
+      rawText: transcript.rawText,
+      source: transcript.source,
+      language: transcript.language,
+      createdAt: transcript.createdAt
+    }
+  });
+});
+
 apiRouter.get('/calls/history', requireAuth, async (req: AuthedRequest, res) => {
   const userId = req.auth!.userId;
   const logs = await CallModel.find({
@@ -579,6 +688,12 @@ apiRouter.get('/calls/history', requireAuth, async (req: AuthedRequest, res) => 
   const users = await UserModel.find({ _id: { $in: userIds } }).lean();
   const names = new Map(users.map((u) => [String(u._id), u.name]));
 
+  const callIds = logs.map((log) => log._id);
+  const callTranscripts = await TranscriptModel.find({ callSessionId: { $in: callIds } })
+    .select('callSessionId')
+    .lean();
+  const callsWithTranscript = new Set(callTranscripts.map((t) => String(t.callSessionId)));
+
   return res.json({
     success: true,
     data: logs.map((log) => {
@@ -591,7 +706,9 @@ apiRouter.get('/calls/history', requireAuth, async (req: AuthedRequest, res) => 
         type: isCaller ? 'outgoing' : 'incoming',
         timestamp: log.createdAt,
         duration: log.duration ?? 0,
-        isVideo: log.isVideo
+        isVideo: log.isVideo,
+        hasRecording: Boolean(log.recordingUrl),
+        hasTranscript: callsWithTranscript.has(String(log._id))
       };
     })
   });

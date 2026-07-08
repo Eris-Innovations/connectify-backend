@@ -11,7 +11,8 @@ export type AdminCapability =
   | 'analytics'
   | 'channels'
   | 'moderation'
-  | 'transcripts';
+  | 'transcripts'
+  | 'announcements';
 
 type AdminActor = {
   _id: Types.ObjectId;
@@ -49,6 +50,9 @@ export async function requireAdminCapability(
       if (actor.role === 'moderator') return actor;
       break;
     case 'transcripts':
+      break;
+    case 'announcements':
+      if (actor.role === 'admin') return actor;
       break;
     case 'user_management':
       if (actor.role === 'admin') return actor;

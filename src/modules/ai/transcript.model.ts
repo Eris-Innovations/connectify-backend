@@ -20,7 +20,7 @@ const transcriptSchema = new Schema(
       default: 'call',
       index: true
     },
-    callSessionId: { type: Schema.Types.ObjectId, ref: 'Call', index: true, sparse: true },
+    callSessionId: { type: Schema.Types.ObjectId, ref: 'Call' },
     conversationId: { type: Schema.Types.ObjectId, ref: 'Conversation', index: true, sparse: true },
     messageId: { type: Schema.Types.ObjectId, ref: 'Message' },
     mediaUrl: { type: String },
@@ -38,6 +38,7 @@ const transcriptSchema = new Schema(
 
 transcriptSchema.index({ rawText: 'text' });
 transcriptSchema.index({ messageId: 1 }, { unique: true, sparse: true });
+transcriptSchema.index({ callSessionId: 1 }, { unique: true, sparse: true });
 transcriptSchema.index({ userId: 1, createdAt: -1 });
 
 export type TranscriptDocument = InferSchemaType<typeof transcriptSchema> & { _id: string };
