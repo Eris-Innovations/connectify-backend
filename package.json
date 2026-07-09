@@ -12,6 +12,7 @@
     "test": "vitest run",
     "cors:from-mobile": "node scripts/print-mobile-cors-origin.cjs",
     "seed:admin": "node --import tsx scripts/seed-admin.ts",
+    "seed:demo-users": "node --import tsx scripts/seed-demo-users.ts",
     "audit:phones": "node --import tsx scripts/audit-phone-normalization.ts"
   },
   "dependencies": {

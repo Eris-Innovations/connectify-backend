@@ -36,8 +36,8 @@ const conversationSchema = new Schema(
     participants: {
       type: [participantSchema],
       validate: {
-        validator: (value: unknown[]) => Array.isArray(value) && value.length >= 2,
-        message: 'Conversation must have at least two participants'
+        validator: (value: unknown[]) => Array.isArray(value) && value.length >= 1,
+        message: 'Conversation must have at least one participant'
       }
     },
     title: { type: String },

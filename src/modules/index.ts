@@ -53,6 +53,68 @@ apiRouter.use(aiAgentRouter);
 apiRouter.use('/friends', friendsRouter);
 apiRouter.use('/calls', callsRouter);
 
+function roleRank(role: 'member' | 'admin' | 'owner'): number {
+  if (role === 'owner') return 3;
+  if (role === 'admin') return 2;
+  return 1;
+}
+
+function asGroupRole(value: unknown): 'member' | 'admin' | 'owner' {
+  return value === 'owner' || value === 'admin' ? value : 'member';
+}
+
+async function resolveGroupForMember(groupId: string, userId: string) {
+  const conversation = await ConversationModel.findById(groupId);
+  if (!conversation || conversation.type !== 'group') return null;
+  const me = conversation.participants.find((participant: any) => String(participant.userId) === userId);
+  if (!me || me.deletedAt) return null;
+  return { conversation, me };
+}
+
+async function buildGroupDtoForUser(conversationId: string, viewerUserId: string) {
+  const conv = await ConversationModel.findById(conversationId)
+    .populate('participants.userId', 'name avatar username')
+    .lean();
+  if (!conv || conv.type !== 'group') return null;
+  const me = conv.participants.find((participant: any) => String(participant.userId?._id ?? participant.userId) === viewerUserId);
+  if (!me || me.deletedAt) return null;
+  const avatar = conv.avatar ? await resolveStoredMediaUrl(conv.avatar) : '';
+  const participants = await Promise.all(
+    (conv.participants ?? [])
+      .filter((participant: any) => !participant.deletedAt)
+      .map(async (participant: any) => {
+        const user = typeof participant.userId === 'object' ? participant.userId : null;
+        const participantAvatar = user?.avatar ? await resolveStoredMediaUrl(user.avatar) : '';
+        return {
+          id: String(user?._id ?? participant.userId),
+          name: String(user?.name ?? 'User'),
+          avatar: participantAvatar,
+          role: asGroupRole(participant.role)
+        };
+      })
+  );
+  return {
+    id: String(conv._id),
+    name: conv.title ?? 'Group',
+    description: conv.description ?? '',
+    avatar,
+    isGroup: true,
+    groupAdmin: String(conv.createdBy),
+    myGroupRole: asGroupRole(me.role),
+    disappearingMessagesSeconds: conv.disappearingMessagesSeconds ?? 0,
+    participants,
+  };
+}
+
+async function emitGroupResync(conversationId: string) {
+  const conv = await ConversationModel.findById(conversationId).select('participants').lean();
+  if (!conv) return;
+  for (const participant of conv.participants ?? []) {
+    if (participant.deletedAt) continue;
+    emitToUser(String(participant.userId), 'chats:resync', {});
+  }
+}
+
 // Chats & messages
 apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
   try {
@@ -92,6 +154,7 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
         conversationId: conv._id,
         senderId: { $ne: userId },
         readBy: { $ne: userId },
+        deletedForUserIds: { $ne: userId },
         $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }]
       });
 
@@ -106,10 +169,11 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
             id: participantUserId,
             name: participantUser?.name ?? 'User',
             avatar: participantAvatar ? await resolveStoredMediaUrl(participantAvatar) : '',
-            role: p.role === 'admin' || p.role === 'owner' ? 'admin' : 'member'
+            role: asGroupRole(p.role)
           };
         })
       );
+      const myParticipant = populatedParticipants.find((p: any) => toParticipantUserId(p) === userId);
 
       return {
         id: listId,
@@ -119,6 +183,7 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
         isGroup: conv.type === 'group',
         description: conv.description ?? '',
         groupAdmin: conv.type === 'group' ? String(conv.createdBy) : undefined,
+        myGroupRole: conv.type === 'group' ? asGroupRole(myParticipant?.role) : undefined,
         disappearingMessagesSeconds: conv.disappearingMessagesSeconds ?? 0,
         lastMessage: stripEnc(rawPreview),
         lastMessageTime: conv.lastActivityAt,
@@ -298,7 +363,7 @@ apiRouter.post('/chats/group', requireAuth, async (req: AuthedRequest, res) => {
     title,
     description,
     participants: [
-      { userId: req.auth!.userId, role: 'admin' },
+      { userId: req.auth!.userId, role: 'owner' },
       ...normalizedParticipants.map((pid) => ({ userId: pid, role: 'member' }))
     ],
     createdBy: req.auth!.userId
@@ -311,9 +376,164 @@ apiRouter.post('/chats/group', requireAuth, async (req: AuthedRequest, res) => {
       description: created.description,
       isGroup: true,
       groupAdmin: req.auth!.userId,
+      myGroupRole: 'owner',
       disappearingMessagesSeconds: 0
     }
   });
+});
+
+apiRouter.get('/groups/:id', requireAuth, async (req: AuthedRequest, res) => {
+  const groupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!groupId || !Types.ObjectId.isValid(groupId)) {
+    return res.status(400).json({ success: false, message: 'Invalid group id.' });
+  }
+  const data = await buildGroupDtoForUser(groupId, req.auth!.userId);
+  if (!data) {
+    return res.status(404).json({ success: false, message: 'Group not found.' });
+  }
+  return res.json({ success: true, data });
+});
+
+apiRouter.patch('/groups/:id', requireAuth, async (req: AuthedRequest, res) => {
+  const groupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!groupId || !Types.ObjectId.isValid(groupId)) {
+    return res.status(400).json({ success: false, message: 'Invalid group id.' });
+  }
+  const resolved = await resolveGroupForMember(groupId, req.auth!.userId);
+  if (!resolved) return res.status(404).json({ success: false, message: 'Group not found.' });
+  const { conversation, me } = resolved;
+  if (!['admin', 'owner'].includes(String(me.role))) {
+    return res.status(403).json({ success: false, message: 'Only group admins can update group details.' });
+  }
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const description = typeof req.body?.description === 'string' ? req.body.description.trim() : '';
+  if (title) conversation.title = title.slice(0, 60);
+  if (typeof req.body?.description === 'string') conversation.description = description.slice(0, 280);
+  await conversation.save();
+  await emitGroupResync(String(conversation._id));
+  const data = await buildGroupDtoForUser(String(conversation._id), req.auth!.userId);
+  return res.json({ success: true, data });
+});
+
+apiRouter.post('/groups/:id/members', requireAuth, async (req: AuthedRequest, res) => {
+  const groupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!groupId || !Types.ObjectId.isValid(groupId)) {
+    return res.status(400).json({ success: false, message: 'Invalid group id.' });
+  }
+  const resolved = await resolveGroupForMember(groupId, req.auth!.userId);
+  if (!resolved) return res.status(404).json({ success: false, message: 'Group not found.' });
+  const { conversation, me } = resolved;
+  if (!['admin', 'owner'].includes(String(me.role))) {
+    return res.status(403).json({ success: false, message: 'Only group admins can add members.' });
+  }
+  const rawMembers: unknown[] = Array.isArray(req.body?.participantIds) ? req.body.participantIds : [];
+  const participantIds: string[] = [...new Set(
+    rawMembers
+      .map((idValue) => String(idValue).trim())
+      .filter((participantId) => Types.ObjectId.isValid(participantId) && participantId !== req.auth!.userId)
+  )];
+  if (participantIds.length === 0) {
+    return res.status(400).json({ success: false, message: 'Select at least one valid participant.' });
+  }
+  const currentIds = new Set(conversation.participants.filter((participant: any) => !participant.deletedAt).map((participant: any) => String(participant.userId)));
+  const users = await UserModel.find({ _id: { $in: participantIds } }).select('_id').lean();
+  if (users.length !== participantIds.length) {
+    return res.status(400).json({ success: false, message: 'One or more selected users do not exist.' });
+  }
+  const friendChecks = await Promise.all(participantIds.map((participantId) => areFriends(req.auth!.userId, participantId)));
+  if (friendChecks.some((allowed) => !allowed)) {
+    return res.status(403).json({ success: false, message: 'Only accepted friends can be added to a group.' });
+  }
+  for (const participantId of participantIds) {
+    if (currentIds.has(participantId)) continue;
+    conversation.participants.push({ userId: new Types.ObjectId(participantId), role: 'member', joinedAt: new Date() } as any);
+  }
+  await conversation.save();
+  await emitGroupResync(String(conversation._id));
+  const data = await buildGroupDtoForUser(String(conversation._id), req.auth!.userId);
+  return res.json({ success: true, data });
+});
+
+apiRouter.patch('/groups/:id/members/:memberId/role', requireAuth, async (req: AuthedRequest, res) => {
+  const groupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const memberId = Array.isArray(req.params.memberId) ? req.params.memberId[0] : req.params.memberId;
+  const nextRole = req.body?.role === 'admin' ? 'admin' : req.body?.role === 'member' ? 'member' : '';
+  if (!groupId || !memberId || !Types.ObjectId.isValid(groupId) || !Types.ObjectId.isValid(memberId) || !nextRole) {
+    return res.status(400).json({ success: false, message: 'Invalid group role update.' });
+  }
+  const resolved = await resolveGroupForMember(groupId, req.auth!.userId);
+  if (!resolved) return res.status(404).json({ success: false, message: 'Group not found.' });
+  const { conversation, me } = resolved;
+  if (String(me.role) !== 'owner') {
+    return res.status(403).json({ success: false, message: 'Only the group owner can manage admin roles.' });
+  }
+  const target = conversation.participants.find((participant: any) => String(participant.userId) === memberId && !participant.deletedAt);
+  if (!target) {
+    return res.status(404).json({ success: false, message: 'Group member not found.' });
+  }
+  if (String(target.role) === 'owner') {
+    return res.status(400).json({ success: false, message: 'Group owner role cannot be changed here.' });
+  }
+  target.role = nextRole;
+  await conversation.save();
+  await emitGroupResync(String(conversation._id));
+  const data = await buildGroupDtoForUser(String(conversation._id), req.auth!.userId);
+  return res.json({ success: true, data });
+});
+
+apiRouter.delete('/groups/:id/members/:memberId', requireAuth, async (req: AuthedRequest, res) => {
+  const groupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const memberId = Array.isArray(req.params.memberId) ? req.params.memberId[0] : req.params.memberId;
+  if (!groupId || !memberId || !Types.ObjectId.isValid(groupId) || !Types.ObjectId.isValid(memberId)) {
+    return res.status(400).json({ success: false, message: 'Invalid group member removal request.' });
+  }
+  const resolved = await resolveGroupForMember(groupId, req.auth!.userId);
+  if (!resolved) return res.status(404).json({ success: false, message: 'Group not found.' });
+  const { conversation, me } = resolved;
+  if (!['admin', 'owner'].includes(String(me.role))) {
+    return res.status(403).json({ success: false, message: 'Only group admins can remove members.' });
+  }
+  const target = conversation.participants.find((participant: any) => String(participant.userId) === memberId && !participant.deletedAt);
+  if (!target) {
+    return res.status(404).json({ success: false, message: 'Group member not found.' });
+  }
+  if (String(target.role) === 'owner') {
+    return res.status(400).json({ success: false, message: 'The group owner cannot be removed.' });
+  }
+  if (roleRank(asGroupRole(me.role)) <= roleRank(asGroupRole(target.role))) {
+    return res.status(403).json({ success: false, message: 'You can only remove members below your role.' });
+  }
+  conversation.participants = conversation.participants.filter((participant: any) => String(participant.userId) !== memberId) as any;
+  await conversation.save();
+  await emitGroupResync(String(conversation._id));
+  return res.json({ success: true });
+});
+
+apiRouter.post('/groups/:id/leave', requireAuth, async (req: AuthedRequest, res) => {
+  const groupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!groupId || !Types.ObjectId.isValid(groupId)) {
+    return res.status(400).json({ success: false, message: 'Invalid group id.' });
+  }
+  const resolved = await resolveGroupForMember(groupId, req.auth!.userId);
+  if (!resolved) return res.status(404).json({ success: false, message: 'Group not found.' });
+  const { conversation, me } = resolved;
+  const leavingRole = asGroupRole(me.role);
+  const remaining = conversation.participants.filter((participant: any) => String(participant.userId) !== req.auth!.userId && !participant.deletedAt);
+  if (remaining.length === 0) {
+    await conversation.deleteOne();
+    return res.json({ success: true, data: { removed: true } });
+  }
+  conversation.participants = remaining as any;
+  if (leavingRole === 'owner') {
+    const nextOwner = remaining.find((participant: any) => asGroupRole(participant.role) === 'admin') ?? remaining[0];
+    if (nextOwner) {
+      nextOwner.role = 'owner';
+      conversation.createdBy = new Types.ObjectId(String(nextOwner.userId));
+    }
+  }
+  await conversation.save();
+  await emitGroupResync(String(conversation._id));
+  return res.json({ success: true, data: { removed: false } });
 });
 
 apiRouter.patch('/chats/:id/disappearing-messages', requireAuth, async (req: AuthedRequest, res) => {
@@ -388,6 +608,7 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
     const before = typeof req.query.before === 'string' ? req.query.before : '';
     const query: Record<string, unknown> = {
       conversationId: mongoConvId,
+      deletedForUserIds: { $ne: req.auth!.userId },
       $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }]
     };
     if (before && Types.ObjectId.isValid(before)) query._id = { $lt: new Types.ObjectId(before) };
@@ -421,8 +642,11 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
         id: String(m._id),
         chatId: listChatId,
         senderId: String(m.senderId),
-        text: stripEnc(m.content?.text ?? ''),
+        text: m.deletedForEveryoneAt
+          ? (m.deletedReplacementText || 'This message was deleted')
+          : stripEnc(m.content?.text ?? ''),
         media: m.content?.mediaUrl
+          && !m.deletedForEveryoneAt
           ? {
               type: m.content.mediaType,
               uri: await resolveStoredMediaUrl(m.content.mediaUrl),
@@ -437,6 +661,7 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
         status: m.readAt ? 'seen' : m.deliveredAt ? 'delivered' : 'sent',
         readBy: Array.isArray(m.readBy) ? m.readBy.map((id: any) => String(id)) : [],
         expiresAt: m.expiresAt,
+        deletedForEveryone: Boolean(m.deletedForEveryoneAt),
         replyTo: m.replyTo
           ? {
               messageId: String(m.replyTo.messageId),
@@ -464,6 +689,7 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
 apiRouter.delete('/messages/:id', requireAuth, async (req: AuthedRequest, res) => {
   try {
     const messageId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const mode = req.query.mode === 'everyone' ? 'everyone' : 'me';
     if (!messageId || !Types.ObjectId.isValid(messageId)) {
       return res.status(400).json({ success: false, message: 'Invalid message id' });
     }
@@ -473,7 +699,7 @@ apiRouter.delete('/messages/:id', requireAuth, async (req: AuthedRequest, res) =
       return res.status(404).json({ success: false, message: 'Message not found' });
     }
 
-    const conv = await ConversationModel.findById(message.conversationId).select('participants').lean();
+    const conv = await ConversationModel.findById(message.conversationId).select('participants type').lean();
     if (!conv) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
@@ -481,8 +707,8 @@ apiRouter.delete('/messages/:id', requireAuth, async (req: AuthedRequest, res) =
     if (!isParticipant) {
       return res.status(403).json({ success: false, message: 'Forbidden' });
     }
-    if (String(message.senderId) !== req.auth!.userId) {
-      return res.status(403).json({ success: false, message: 'Only the sender can delete this message' });
+    if (mode === 'everyone' && String(message.senderId) !== req.auth!.userId) {
+      return res.status(403).json({ success: false, message: 'Only the sender can delete this message for everyone' });
     }
 
     const conversationId = String(message.conversationId);
@@ -490,17 +716,46 @@ apiRouter.delete('/messages/:id', requireAuth, async (req: AuthedRequest, res) =
       String((await ConversationModel.findById(conversationId).select('lastMessage.messageId').lean())?.lastMessage?.messageId ?? '') ===
       String(message._id);
 
-    await message.deleteOne();
+    if (mode === 'everyone') {
+      message.content = {
+        text: '',
+        mediaType: 'text',
+        metadata: undefined,
+        mediaUrl: undefined
+      };
+      message.deletedForEveryoneAt = new Date();
+      message.deletedBy = new Types.ObjectId(req.auth!.userId);
+      message.deletedReplacementText = 'This message was deleted';
+      await message.save();
+    } else {
+      await MessageModel.updateOne(
+        { _id: message._id },
+        { $addToSet: { deletedForUserIds: new Types.ObjectId(req.auth!.userId) } }
+      );
+    }
 
-    if (deletingLast) {
-      const latest = await MessageModel.findOne({ conversationId }).sort({ createdAt: -1 }).lean();
+    if (mode === 'everyone' && deletingLast) {
+      const latest = await MessageModel.findOne({
+        conversationId,
+        $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }]
+      }).sort({ createdAt: -1 }).lean();
       if (latest) {
         await ConversationModel.findByIdAndUpdate(conversationId, {
           lastActivityAt: latest.createdAt,
           lastMessage: {
             messageId: latest._id,
             senderId: latest.senderId,
-            previewText: latest.content?.text?.slice(0, 200) ?? '',
+            previewText: latest.deletedForEveryoneAt
+              ? (latest.deletedReplacementText || 'This message was deleted')
+              : latest.content?.mediaUrl
+                ? latest.content.mediaType === 'voice'
+                  ? '🎤 Voice message'
+                  : latest.content.mediaType === 'image'
+                    ? '📷 Photo'
+                    : latest.content.mediaType === 'video'
+                      ? '🎥 Video'
+                      : '📎 File'
+                : latest.content?.text?.slice(0, 200) ?? '',
             createdAt: latest.createdAt
           }
         }).exec();
@@ -512,7 +767,24 @@ apiRouter.delete('/messages/:id', requireAuth, async (req: AuthedRequest, res) =
       }
     }
 
-    return res.json({ success: true, data: { id: messageId } });
+    const participantIds = conv.participants.map((p: any) => String(p.userId));
+    const eventRecipients = mode === 'everyone' ? participantIds : [req.auth!.userId];
+    for (const participantId of eventRecipients) {
+      const eventConversationId =
+        conv.type === 'dm'
+          ? dmVirtualId(participantId, participantIds.find((id) => id !== participantId) ?? participantId)
+          : conversationId;
+      emitToUser(participantId, 'message:deleted', {
+        conversationId: eventConversationId,
+        messageId,
+        mode,
+        deletedBy: req.auth!.userId,
+        replacementText: mode === 'everyone' ? 'This message was deleted' : undefined
+      });
+      emitToUser(participantId, 'chats:resync', {});
+    }
+
+    return res.json({ success: true, data: { id: messageId, mode } });
   } catch (error) {
     console.error('Failed to delete message', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
