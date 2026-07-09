@@ -21,5 +21,5 @@ const broadcastAnnouncementSchema = new Schema(
   }
 );
 
-export type BroadcastAnnouncementDocument = InferSchemaType<typeof broadcastAnnouncementSchema> & { _id: string };
+export type BroadcastAnnouncementRecord = InferSchemaType<typeof broadcastAnnouncementSchema>;
 export const BroadcastAnnouncementModel = models.BroadcastAnnouncement || model('BroadcastAnnouncement', broadcastAnnouncementSchema);
