@@ -32,6 +32,21 @@ function buildPasswordResetHtml(code: string, displayName?: string) {
 </html>`;
 }
 
+function buildPasswordResetText(code: string, displayName?: string) {
+  const greeting = displayName?.trim() ? `Hi ${displayName.trim()},` : 'Hi,';
+  return [
+    'Connectify',
+    '',
+    greeting,
+    '',
+    'Use this code to reset your password. It expires in 5 minutes.',
+    '',
+    code,
+    '',
+    'If you did not request a password reset, you can ignore this email.'
+  ].join('\n');
+}
+
 function buildSignupVerificationHtml(code: string, displayName?: string) {
   const safeName = displayName?.trim() ? escapeHtml(displayName.trim()) : '';
   const greeting = safeName ? `Hi ${safeName},` : 'Hi,';
@@ -46,6 +61,21 @@ function buildSignupVerificationHtml(code: string, displayName?: string) {
   <p style="color:#6b7280;font-size:14px;margin:24px 0 0;">If you did not create a Connectify account, you can ignore this email.</p>
 </body>
 </html>`;
+}
+
+function buildSignupVerificationText(code: string, displayName?: string) {
+  const greeting = displayName?.trim() ? `Hi ${displayName.trim()},` : 'Hi,';
+  return [
+    'Connectify',
+    '',
+    greeting,
+    '',
+    'Thanks for signing up. Enter this code in the app to verify your email. It expires in 5 minutes.',
+    '',
+    code,
+    '',
+    'If you did not create a Connectify account, you can ignore this email.'
+  ].join('\n');
 }
 
 export type SendEmailResult = { sent: true } | { sent: false; reason: 'not_configured' | 'request_failed'; detail?: string };
@@ -85,7 +115,8 @@ export async function sendPasswordResetEmail(to: string, code: string, displayNa
       from,
       to: to.toLowerCase(),
       subject: 'Your Connectify password reset code',
-      html: buildPasswordResetHtml(code, displayName)
+      html: buildPasswordResetHtml(code, displayName),
+      text: buildPasswordResetText(code, displayName)
     });
 
     if (error) {
@@ -140,7 +171,8 @@ export async function sendSignupVerificationEmail(
       from,
       to: to.toLowerCase(),
       subject: 'Verify your Connectify email',
-      html: buildSignupVerificationHtml(code, displayName)
+      html: buildSignupVerificationHtml(code, displayName),
+      text: buildSignupVerificationText(code, displayName)
     });
 
     if (error) {

@@ -36,7 +36,11 @@ const messageSchema = new Schema(
     isSecret: { type: Boolean, default: false, index: true },
     isEncrypted: { type: Boolean, default: false },
     replyTo: { type: replySnapshotSchema },
-    expiresAt: { type: Date }
+    expiresAt: { type: Date },
+    deletedForUserIds: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+    deletedForEveryoneAt: { type: Date },
+    deletedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    deletedReplacementText: { type: String, default: '' }
   },
   {
     timestamps: { createdAt: true, updatedAt: true }

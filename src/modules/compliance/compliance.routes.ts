@@ -8,6 +8,12 @@ import { AuditLogModel } from './audit-log.model';
 import { DsarRequestModel } from './dsar-request.model';
 import { ErasureRequestModel } from './erasure-request.model';
 import { ReportedContentModel } from '../admin/reported-content.model';
+import {
+  CONSENT_PURPOSES,
+  TRANSCRIPTION_POLICY_VERSION,
+  withdrawalPurpose
+} from './consent.constants';
+import { getTranscriptionConsentStatus } from './consent.service';
 
 export const complianceRouter = Router();
 const REPORTABLE_ENTITY_TYPES = new Set(['message', 'channel', 'user']);
@@ -57,6 +63,65 @@ complianceRouter.post('/compliance/consents', requireAuth, async (req: AuthedReq
   });
 
   return res.status(201).json({ success: true, data: consent });
+});
+
+complianceRouter.get('/compliance/consents', requireAuth, async (req: AuthedRequest, res) => {
+  const userId = req.auth!.userId;
+  const transcription = await getTranscriptionConsentStatus(userId);
+
+  const records = await ConsentRecordModel.find({ userId })
+    .sort({ acceptedAt: -1 })
+    .limit(50)
+    .lean();
+
+  return res.json({
+    success: true,
+    data: {
+      transcription,
+      policyVersion: TRANSCRIPTION_POLICY_VERSION,
+      purposes: CONSENT_PURPOSES,
+      records: records.map((r) => ({
+        id: String(r._id),
+        purpose: r.purpose,
+        policyVersion: r.policyVersion,
+        acceptedAt: r.acceptedAt
+      }))
+    }
+  });
+});
+
+complianceRouter.post('/compliance/consents/withdraw', requireAuth, async (req: AuthedRequest, res) => {
+  const purpose = typeof req.body.purpose === 'string' ? req.body.purpose.trim() : '';
+  const policyVersion =
+    typeof req.body.policyVersion === 'string' ? req.body.policyVersion.trim() : TRANSCRIPTION_POLICY_VERSION;
+
+  const allowedPurposes = new Set<string>(Object.values(CONSENT_PURPOSES));
+  if (!purpose || !allowedPurposes.has(purpose)) {
+    return res.status(400).json({
+      success: false,
+      message: `purpose must be one of: ${[...allowedPurposes].join(', ')}`
+    });
+  }
+
+  const user = await UserModel.findById(req.auth!.userId).lean();
+  const withdrawal = await ConsentRecordModel.create({
+    userId: req.auth!.userId,
+    purpose: withdrawalPurpose(purpose),
+    policyVersion,
+    ipAddress: typeof req.body.ipAddress === 'string' ? req.body.ipAddress.trim() : ''
+  });
+
+  await writeAuditLog({
+    actorUserId: req.auth!.userId,
+    action: 'consent_withdrawn',
+    targetType: 'consent_record',
+    targetId: String(withdrawal._id),
+    region: user?.region ?? 'na',
+    metadata: { purpose, policyVersion }
+  });
+
+  const transcription = await getTranscriptionConsentStatus(req.auth!.userId);
+  return res.json({ success: true, data: { transcription } });
 });
 
 complianceRouter.post('/compliance/reports', requireAuth, async (req: AuthedRequest, res) => {

@@ -9,6 +9,7 @@ import { UserModel } from '../users/user.model';
 import { OtpModel } from './otp.model';
 import { RefreshTokenModel } from './refresh-token.model';
 import { normalizePhone } from '../../lib/phone';
+import { AuthSecurityEventModel } from './security-event.model';
 
 type RegisterInput = {
   name: string;
@@ -23,8 +24,36 @@ type LoginInput = {
   password: string;
 };
 
+export type AuthRequestMetadata = {
+  ipAddress?: string;
+  userAgent?: string;
+  platform?: string;
+  appVersion?: string;
+};
+
 function sixDigitOtp(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function recordAuthSecurityEvent(input: {
+  event: 'register_attempt' | 'register_success' | 'login_success' | 'login_failed';
+  userId?: string;
+  email?: string;
+  meta?: AuthRequestMetadata;
+}) {
+  try {
+    await AuthSecurityEventModel.create({
+      userId: input.userId || undefined,
+      email: input.email?.trim().toLowerCase(),
+      event: input.event,
+      ipAddress: input.meta?.ipAddress?.trim().slice(0, 80) ?? '',
+      userAgent: input.meta?.userAgent?.trim().slice(0, 500) ?? '',
+      platform: input.meta?.platform?.trim().slice(0, 40) ?? '',
+      appVersion: input.meta?.appVersion?.trim().slice(0, 40) ?? ''
+    });
+  } catch (error) {
+    console.warn('[auth.security] event write failed', input.event, error);
+  }
 }
 
 /** Only expose OTP in API when email was not sent and Resend is not configured (local dev). */
@@ -84,7 +113,8 @@ async function revokeRefreshTokenInRedis(token: string) {
   }
 }
 
-export async function registerUser(input: RegisterInput) {
+export async function registerUser(input: RegisterInput, meta?: AuthRequestMetadata) {
+  await recordAuthSecurityEvent({ event: 'register_attempt', email: input.email, meta });
   const normalizedPhone = normalizePhone(input.phone ?? '');
   if (!normalizedPhone) {
     return {
@@ -173,6 +203,13 @@ export async function registerUser(input: RegisterInput) {
       };
     }
   }
+
+  await recordAuthSecurityEvent({
+    event: 'register_success',
+    userId: String(user._id),
+    email: user.email,
+    meta
+  });
 
   return {
     status: StatusCodes.CREATED,
@@ -324,14 +361,16 @@ export async function verifyOtp(userId: string, code: string) {
   };
 }
 
-export async function loginUser(input: LoginInput) {
+export async function loginUser(input: LoginInput, meta?: AuthRequestMetadata) {
   const user = await UserModel.findOne({ email: input.email.toLowerCase() });
   if (!user) {
+    await recordAuthSecurityEvent({ event: 'login_failed', email: input.email, meta });
     return { status: StatusCodes.UNAUTHORIZED, body: { success: false, message: 'Email or password is incorrect.', errorCode: 'INVALID_CREDENTIALS' } };
   }
 
   const valid = await bcrypt.compare(input.password, user.passwordHash);
   if (!valid) {
+    await recordAuthSecurityEvent({ event: 'login_failed', userId: String(user._id), email: user.email, meta });
     return { status: StatusCodes.UNAUTHORIZED, body: { success: false, message: 'Email or password is incorrect.', errorCode: 'INVALID_CREDENTIALS' } };
   }
   if (!user.isVerified) {
@@ -358,6 +397,7 @@ export async function loginUser(input: LoginInput) {
     expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
   });
   await storeRefreshTokenInRedis(refreshToken);
+  await recordAuthSecurityEvent({ event: 'login_success', userId: String(user._id), email: user.email, meta });
 
   return {
     status: StatusCodes.OK,
