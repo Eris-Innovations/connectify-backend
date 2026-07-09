@@ -1,18 +1,13 @@
 import { Types } from 'mongoose';
 import { UserModel } from '../users/user.model';
-import { BroadcastAnnouncementModel } from './broadcast.model';
+
+import { BroadcastAnnouncementModel, type BroadcastAnnouncementDocument } from './broadcast.model';
+
 import { getExpoPushTokensForUser, sendExpoPush } from '../../lib/expoPush';
 import { emitToUser } from '../../sockets/io';
 
 export type BroadcastTargetGroup = 'all' | 'verified' | 'creators' | 'custom';
 
-type BroadcastAnnouncementLean = {
-  _id: Types.ObjectId;
-  title: string;
-  body: string;
-  targetGroup: BroadcastTargetGroup;
-  targetUserIds?: Types.ObjectId[];
-};
 
 export function normalizeBroadcastTargetGroup(value: string | undefined): BroadcastTargetGroup {
   return value === 'verified' || value === 'creators' || value === 'custom' ? value : 'all';
@@ -53,15 +48,11 @@ export async function createBroadcastAnnouncement(input: {
 }
 
 export async function dispatchBroadcastAnnouncement(announcementId: string): Promise<void> {
-  const announcement = await BroadcastAnnouncementModel.findById(announcementId).lean<BroadcastAnnouncementLean | null>();
+  const announcement = await BroadcastAnnouncementModel.findById(announcementId).lean<BroadcastAnnouncementDocument | null>();
   if (!announcement) return;
 
-  const recipients = await UserModel.find(
-    buildBroadcastRecipientQuery(
-      announcement.targetGroup,
-      (announcement.targetUserIds ?? []).map((id) => String(id))
-    )
-  )
+  const targetUserIds = (announcement.targetUserIds ?? []).map((id) => String(id));
+  const recipients = await UserModel.find(buildBroadcastRecipientQuery(announcement.targetGroup as BroadcastTargetGroup, targetUserIds))
     .select('_id settings expoPushTokens')
     .lean();
 
