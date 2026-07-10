@@ -1,7 +1,7 @@
 import { Types } from 'mongoose';
 import { UserModel } from '../users/user.model';
 
-import { BroadcastAnnouncementModel, type BroadcastAnnouncementDocument } from './broadcast.model';
+import { BroadcastAnnouncementModel, type BroadcastAnnouncementRecord } from './broadcast.model';
 
 import { getExpoPushTokensForUser, sendExpoPush } from '../../lib/expoPush';
 import { emitToUser } from '../../sockets/io';
@@ -48,11 +48,11 @@ export async function createBroadcastAnnouncement(input: {
 }
 
 export async function dispatchBroadcastAnnouncement(announcementId: string): Promise<void> {
-  const announcement = await BroadcastAnnouncementModel.findById(announcementId).lean<BroadcastAnnouncementDocument | null>();
+  const announcement = await BroadcastAnnouncementModel.findById(announcementId).lean<BroadcastAnnouncementRecord | null>();
   if (!announcement) return;
 
   const targetUserIds = (announcement.targetUserIds ?? []).map((id) => String(id));
-  const recipients = await UserModel.find(buildBroadcastRecipientQuery(announcement.targetGroup as BroadcastTargetGroup, targetUserIds))
+  const recipients = await UserModel.find(buildBroadcastRecipientQuery(normalizeBroadcastTargetGroup(announcement.targetGroup), targetUserIds))
     .select('_id settings expoPushTokens')
     .lean();
 
