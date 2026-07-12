@@ -9,6 +9,7 @@ import { CallModel } from '../calls/call.model';
 import { AuditLogModel } from '../compliance/audit-log.model';
 import { ReportedContentModel } from './reported-content.model';
 import { RefreshTokenModel } from '../auth/refresh-token.model';
+import { DevicePushTokenModel } from '../users/device-push-token.model';
 import { adminUserGalleryGet } from './user-gallery.controller';
 import { adminUserChatsList, adminChatMessagesGet } from './user-chats.controller';
 import { clampSearchQuery, escapeMongoRegex } from '../../lib/mongoRegex';
@@ -87,7 +88,21 @@ adminRouter.get('/admin/analytics/overview', requireAuth, async (req: AuthedRequ
   const thirtyDaysAgo = new Date(now - 30 * oneDayMs);
   const ninetyDaysAgo = new Date(now - 90 * oneDayMs);
 
-  const [dau, mau, messagesToday, callMinutesToday, signupsToday, signups30d, signups90d] = await Promise.all([
+  const [
+    dau,
+    mau,
+    messagesToday,
+    callMinutesToday,
+    signupsToday,
+    signups30d,
+    signups90d,
+    totalMembers,
+    totalStaff,
+    verifiedMembers,
+    suspendedMembers,
+    completedProfiles,
+    platformRows
+  ] = await Promise.all([
     UserModel.countDocuments({ updatedAt: { $gte: new Date(now - oneDayMs) } }),
     UserModel.countDocuments({ updatedAt: { $gte: thirtyDaysAgo } }),
     MessageModel.countDocuments({ createdAt: { $gte: new Date(now - oneDayMs) } }),
@@ -105,8 +120,28 @@ adminRouter.get('/admin/analytics/overview', requireAuth, async (req: AuthedRequ
       { $match: { createdAt: { $gte: ninetyDaysAgo } } },
       { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, value: { $sum: 1 } } },
       { $sort: { _id: 1 } }
+    ]),
+    UserModel.countDocuments({ role: 'user' }),
+    UserModel.countDocuments({ role: { $in: ['admin', 'super_admin', 'moderator', 'analyst'] } }),
+    UserModel.countDocuments({ role: 'user', isVerified: true }),
+    UserModel.countDocuments({ role: 'user', isSuspended: true }),
+    UserModel.countDocuments({ role: 'user', hasCompletedProfile: true }),
+    // Product currently ships Android only — ignore leftover iOS tokens in analytics.
+    DevicePushTokenModel.aggregate([
+      { $match: { enabled: true, platform: 'android' } },
+      { $group: { _id: '$platform', count: { $sum: 1 } } }
     ])
   ]);
+
+  const androidDevices = Number(platformRows?.[0]?.count ?? 0);
+  const platformMix = [
+    {
+      platform: 'android',
+      label: 'Android',
+      count: androidDevices,
+      percent: androidDevices > 0 ? 100 : 0
+    }
+  ];
 
   return res.json({
     success: true,
@@ -117,7 +152,13 @@ adminRouter.get('/admin/analytics/overview', requireAuth, async (req: AuthedRequ
       callMinutesPerDay: Math.round(Number(callMinutesToday?.[0]?.minutes ?? 0)),
       newSignupsToday: signupsToday,
       signups30d,
-      signups90d
+      signups90d,
+      totalMembers,
+      totalStaff,
+      verifiedMembers,
+      suspendedMembers,
+      completedProfiles,
+      platformMix
     }
   });
 });
@@ -777,8 +818,10 @@ adminRouter.get('/admin/users', requireAuth, async (req: AuthedRequest, res) => 
     .limit(300)
     .populate('assignedAdminId', 'name email')
     .lean();
+  const total = await UserModel.countDocuments(query);
   return res.json({
     success: true,
+    meta: { total, returned: users.length, limit: 300 },
     data: users.map((user) => ({
       id: String(user._id),
       name: user.name,
