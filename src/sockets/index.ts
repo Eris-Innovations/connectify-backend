@@ -20,7 +20,7 @@ import {
   getActiveCall,
   setActiveCall,
 } from '../modules/calls/active-call.service';
-import { authorizeActiveCallSignal, authorizeCallEnd } from '../modules/calls/call-authorization';
+import { authorizeCallEnd } from '../modules/calls/call-authorization';
 import { setSocketIo, setUserAppForeground, clearUserAppForeground } from './io';
 import { enqueueNotification } from '../modules/notifications/notification-outbox.service';
 
@@ -607,7 +607,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
       });
     });
 
-    socket.on('call:initiate', async (payload: { to: string; callerName?: string; offer: unknown }) => {
+    socket.on(
+      'call:initiate',
+      async (payload: { to: string; callerName?: string; isVideo?: boolean; offer?: unknown }) => {
       try {
         const callerId = socket.data.userId as string;
         const receiverId = typeof payload.to === 'string' ? payload.to.trim() : '';
@@ -624,15 +626,15 @@ export function createSocketServer(httpServer: HttpServer): Server {
           return;
         }
 
-        const offerSdp =
-          payload.offer && typeof payload.offer === 'object' && typeof (payload.offer as { sdp?: unknown }).sdp === 'string'
-            ? (payload.offer as { sdp: string }).sdp
-            : '';
-        if (!offerSdp.trim()) {
-          socket.emit('call:failed', { reason: 'invalid_offer' });
-          return;
+        // LiveKit media path: SDP offer is optional (legacy P2P clients may still send it).
+        let isVideo = Boolean(payload.isVideo);
+        if (payload.offer && typeof payload.offer === 'object') {
+          const offerSdp =
+            typeof (payload.offer as { sdp?: unknown }).sdp === 'string'
+              ? (payload.offer as { sdp: string }).sdp
+              : '';
+          if (offerSdp.includes('m=video')) isVideo = true;
         }
-        const isVideo = offerSdp.includes('m=video');
 
         const existing = await getPendingCall(receiverId);
         if (existing) {
@@ -656,7 +658,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
           callerId,
           callerName: payload.callerName ?? 'Unknown',
           isVideo,
-          offer: payload.offer,
+          ...(payload.offer !== undefined ? { offer: payload.offer } : {}),
         });
 
         const socketsInRoom = io.sockets.adapter.rooms.get(`user:${receiverId}`)?.size ?? 0;
@@ -676,19 +678,23 @@ export function createSocketServer(httpServer: HttpServer): Server {
           callId: pending.callId,
           room: `user:${receiverId}`,
           socketsInRoom,
+          media: 'livekit',
+          isVideo,
         });
 
         io.to(`user:${receiverId}`).emit('call:invitation', {
           callId: pending.callId,
           fromId: callerId,
           fromName: payload.callerName ?? 'Unknown',
-          offer: payload.offer,
           isVideo,
+          media: 'livekit',
+          ...(payload.offer !== undefined ? { offer: payload.offer } : {}),
         });
 
-        socket.emit('call:ringing', { callId: pending.callId, receiverId });
+        socket.emit('call:ringing', { callId: pending.callId, receiverId, media: 'livekit' });
 
         // Always wake Android (data-only FCM) + iOS Expo via outbox retries.
+        // LiveKit JWTs are never included in push payloads.
         void enqueueNotification({
           eventId: `call:${pending.callId}:${receiverId}`,
           userId: receiverId,
@@ -698,8 +704,8 @@ export function createSocketServer(httpServer: HttpServer): Server {
             callId: pending.callId,
             callerId,
             callerName: payload.callerName ?? 'Unknown',
-            isVideo
-          }
+            isVideo,
+          },
         });
       } catch (error) {
         console.error('[call:initiate] failed', error);
@@ -707,7 +713,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
       }
     });
 
-    socket.on('call:accept', async (payload: { to: string; answer: unknown; callId?: string }) => {
+    socket.on('call:accept', async (payload: { to: string; callId?: string; answer?: unknown }) => {
       try {
         const accepterId = socket.data.userId as string;
         const callerId = typeof payload.to === 'string' ? payload.to.trim() : '';
@@ -730,8 +736,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
         await setActiveCall(accepterId, pending.callId, callerId);
         await setActiveCall(callerId, pending.callId, accepterId);
         io.to(`user:${callerId}`).emit('call:accepted', {
-          answer: payload.answer,
           callId: pending.callId,
+          media: 'livekit',
+          ...(payload.answer !== undefined ? { answer: payload.answer } : {}),
         });
       } catch (error) {
         console.error('[call:accept] failed', error);
@@ -739,60 +746,10 @@ export function createSocketServer(httpServer: HttpServer): Server {
       }
     });
 
-    socket.on('ice-candidate', async (payload: { to: string; candidate: unknown; callId?: string }) => {
-      const targetId = typeof payload.to === 'string' ? payload.to.trim() : '';
-      if (!targetId || !payload.candidate) return;
-      const me = socket.data.userId as string;
-      const requestedCallId = typeof payload.callId === 'string' ? payload.callId : undefined;
-      const active = await getActiveCall(me);
-      let authorized = authorizeActiveCallSignal(active, targetId, requestedCallId) === 'ok';
-      if (!authorized) {
-        const [pendingForMe, pendingForTarget] = await Promise.all([
-          getPendingCall(me),
-          getPendingCall(targetId)
-        ]);
-        authorized = Boolean(
-          (pendingForMe?.callerId === targetId &&
-            (!requestedCallId || pendingForMe.callId === requestedCallId)) ||
-          (pendingForTarget?.callerId === me &&
-            (!requestedCallId || pendingForTarget.callId === requestedCallId))
-        );
-      }
-      if (!authorized) {
-        socket.emit('call:error', { code: 'unauthorized_signal' });
-        return;
-      }
-      io.to(`user:${targetId}`).emit('ice-candidate', {
-        candidate: payload.candidate,
-        callId: requestedCallId,
-        fromId: me,
-      });
-    });
-
-    socket.on(
-      'call:renegotiate',
-      async (payload: { to: string; callId?: string; sdp?: unknown; type?: 'offer' | 'answer' }) => {
-        const targetId = typeof payload.to === 'string' ? payload.to.trim() : '';
-        if (!targetId || !payload.sdp || (payload.type !== 'offer' && payload.type !== 'answer')) return;
-        const me = socket.data.userId as string;
-        const active = await getActiveCall(me);
-        const authorization = authorizeActiveCallSignal(active, targetId, payload.callId);
-        if (authorization === 'no_active_call') {
-          socket.emit('call:error', { code: 'no_pending_call' });
-          return;
-        }
-        if (authorization === 'call_id_mismatch') {
-          socket.emit('call:error', { code: 'call_id_mismatch' });
-          return;
-        }
-        io.to(`user:${targetId}`).emit('call:renegotiate', {
-          fromId: me,
-          callId: active!.callId,
-          sdp: payload.sdp,
-          type: payload.type,
-        });
-      }
-    );
+    // Legacy P2P ICE/renegotiate — no-ops while LiveKit owns the media plane.
+    // Kept so older clients do not crash the socket handler; signals are dropped.
+    socket.on('ice-candidate', () => {});
+    socket.on('call:renegotiate', () => {});
 
     socket.on('call:end', async (payload: { to: string; reason?: string; callId?: string }) => {
       const me = socket.data.userId as string;

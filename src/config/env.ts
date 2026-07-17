@@ -81,7 +81,11 @@ const envSchema = z.object({
   FIREBASE_PRIVATE_KEY: optionalTrimmedLoose(),
   /** Cloudflare Realtime TURN key id + API token for short-lived ICE credentials. */
   CLOUDFLARE_TURN_KEY_ID: optionalTrimmed('CLOUDFLARE_TURN_KEY_ID'),
-  CLOUDFLARE_TURN_API_TOKEN: optionalTrimmed('CLOUDFLARE_TURN_API_TOKEN')
+  CLOUDFLARE_TURN_API_TOKEN: optionalTrimmed('CLOUDFLARE_TURN_API_TOKEN'),
+  /** Self-hosted LiveKit SFU (wss://…). Required for production voice/video media. */
+  LIVEKIT_URL: optionalTrimmed('LIVEKIT_URL'),
+  LIVEKIT_API_KEY: optionalTrimmed('LIVEKIT_API_KEY'),
+  LIVEKIT_API_SECRET: optionalTrimmed('LIVEKIT_API_SECRET')
 });
 
 const parsed = envSchema.safeParse(process.env);
