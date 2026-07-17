@@ -2,9 +2,9 @@ import { Router } from 'express';
 import { StatusCodes } from 'http-status-codes';
 import { requireAuth, type AuthedRequest } from '../../middleware/auth';
 import { dmVirtualId } from '../../lib/conversationIds';
-import { emitToUser, shouldDeliverPushToUser } from '../../sockets/io';
-import { getExpoPushTokensForUser, sendFriendRequestPush } from '../../lib/expoPush';
+import { emitToUser } from '../../sockets/io';
 import { UserModel } from '../users/user.model';
+import { enqueueNotification } from '../notifications/notification-outbox.service';
 import {
   acceptFriendRequest,
   getFriendRelationship,
@@ -51,25 +51,26 @@ friendsRouter.post('/requests', requireAuth, asyncHandler(async (req: AuthedRequ
     return res.status(result.status).json({ success: false, message: result.message });
   }
 
-  emitToUser(targetUserId, 'friend-request:new', {
-    connectionId: result.data.id,
-    fromUserId: req.auth!.userId
-  });
+  // Only notify on a real state transition (new / re-opened request).
+  if (result.data.created) {
+    emitToUser(targetUserId, 'friend-request:new', {
+      connectionId: result.data.id,
+      fromUserId: req.auth!.userId
+    });
 
-  if (shouldDeliverPushToUser(targetUserId)) {
     void (async () => {
-      const tokens = await getExpoPushTokensForUser(targetUserId, { category: 'general' });
-      if (tokens.length === 0) {
-        console.warn('[push.friend_request] skipped — no tokens', { targetUserId });
-        return;
-      }
       const sender = await UserModel.findById(req.auth!.userId).select('name username').lean();
       const fromName = sender?.name || sender?.username || 'Someone';
-      console.log('[push.friend_request] sending', { targetUserId, tokenCount: tokens.length });
-      await sendFriendRequestPush(tokens, {
-        fromName,
-        fromUserId: req.auth!.userId,
-        connectionId: result.data.id,
+      await enqueueNotification({
+        eventId: `friend_request:${result.data.id}:${targetUserId}:${result.data.notifyEpoch}`,
+        userId: targetUserId,
+        kind: 'friend_request',
+        correlationId: result.data.id,
+        payload: {
+          fromName,
+          fromUserId: req.auth!.userId,
+          connectionId: result.data.id
+        }
       });
     })();
   }
@@ -90,6 +91,22 @@ friendsRouter.post('/requests/:id/accept', requireAuth, asyncHandler(async (req:
     peerUserId: req.auth!.userId,
     chatId
   });
+
+  void (async () => {
+    const accepter = await UserModel.findById(req.auth!.userId).select('name username').lean();
+    const accepterName = accepter?.name || accepter?.username || 'Someone';
+    await enqueueNotification({
+      eventId: `friend_request_accepted:${connectionId}:${result.data.peerUserId}`,
+      userId: result.data.peerUserId,
+      kind: 'friend_request_accepted',
+      correlationId: connectionId,
+      payload: {
+        accepterName,
+        accepterUserId: req.auth!.userId,
+        chatId
+      }
+    });
+  })();
 
   return res.status(StatusCodes.OK).json({
     success: true,

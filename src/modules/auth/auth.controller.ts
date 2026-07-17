@@ -97,7 +97,11 @@ export async function logoutController(req: AuthedRequest, res: Response) {
   if (!parsed.success) {
     return validationFailure(res, parsed.error);
   }
-  const result = await logoutUser(req.auth!.userId, parsed.data.body.refreshToken);
+  const result = await logoutUser(
+    req.auth!.userId,
+    parsed.data.body.refreshToken,
+    parsed.data.body.deviceId
+  );
   return res.status(result.status).json(result.body);
 }
 

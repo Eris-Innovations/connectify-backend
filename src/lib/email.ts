@@ -83,6 +83,21 @@ export type SendEmailResult = { sent: true } | { sent: false; reason: 'not_confi
 const EMAIL_FROM_MISSING_DETAIL =
   'EMAIL_FROM is not set. Verify your domain at https://resend.com/domains, then set EMAIL_FROM to a sender on that domain (e.g. Connectify <noreply@yourdomain.com>).';
 
+/** Resend accepts bare emails; prefer `Name <email@domain>` when only an address is configured. */
+export function normalizeEmailFrom(raw: string): string {
+  const from = raw.trim();
+  if (!from) return from;
+  if (from.includes('<') && from.includes('>')) return from;
+  if (/^[^\s<>]+@[^\s<>]+$/.test(from)) return `Connectify <${from}>`;
+  return from;
+}
+
+function resolveEmailFrom(): { from?: string; missingDetail?: string } {
+  const raw = env.EMAIL_FROM?.trim();
+  if (!raw) return { missingDetail: EMAIL_FROM_MISSING_DETAIL };
+  return { from: normalizeEmailFrom(raw) };
+}
+
 /**
  * Password reset email via Resend (official SDK).
  * Set `RESEND_API_KEY` and `EMAIL_FROM` in `.env` — never hardcode the key in source.
@@ -98,14 +113,14 @@ export async function sendPasswordResetEmail(to: string, code: string, displayNa
     return { sent: false, reason: 'not_configured' };
   }
 
-  const from = env.EMAIL_FROM?.trim();
+  const { from, missingDetail } = resolveEmailFrom();
   if (!from) {
     if (env.NODE_ENV !== 'production') {
       console.info(`[email] EMAIL_FROM not set — password reset email not sent (OTP for ${to}: ${code})`);
     } else {
       console.warn('[email] EMAIL_FROM not set — password reset email was not sent');
     }
-    return { sent: false, reason: 'not_configured', detail: EMAIL_FROM_MISSING_DETAIL };
+    return { sent: false, reason: 'not_configured', detail: missingDetail };
   }
 
   const resend = new Resend(apiKey);
@@ -154,14 +169,14 @@ export async function sendSignupVerificationEmail(
     return { sent: false, reason: 'not_configured' };
   }
 
-  const from = env.EMAIL_FROM?.trim();
+  const { from, missingDetail } = resolveEmailFrom();
   if (!from) {
     if (env.NODE_ENV !== 'production') {
       console.info(`[email] EMAIL_FROM not set — signup verification email not sent (OTP for ${to}: ${code})`);
     } else {
       console.warn('[email] EMAIL_FROM not set — signup verification email was not sent');
     }
-    return { sent: false, reason: 'not_configured', detail: EMAIL_FROM_MISSING_DETAIL };
+    return { sent: false, reason: 'not_configured', detail: missingDetail };
   }
 
   const resend = new Resend(apiKey);

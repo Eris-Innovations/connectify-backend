@@ -30,6 +30,8 @@ const messageSchema = new Schema(
       default: 'message',
       index: true
     },
+    /** Client-generated idempotency key for reconnect/retry-safe sends. */
+    clientId: { type: String, trim: true, maxlength: 120 },
     deliveredAt: { type: Date },
     readAt: { type: Date },
     readBy: [{ type: Schema.Types.ObjectId, ref: 'User' }],
@@ -51,6 +53,11 @@ const messageSchema = new Schema(
 messageSchema.index({ conversationId: 1, createdAt: -1 });
 // Sender history queries
 messageSchema.index({ senderId: 1, createdAt: -1 });
+// Idempotent client sends (sparse so system messages without clientId are allowed)
+messageSchema.index(
+  { senderId: 1, clientId: 1 },
+  { unique: true, partialFilterExpression: { clientId: { $type: 'string', $gt: '' } } }
+);
 // TTL for secret / ephemeral messages
 messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 

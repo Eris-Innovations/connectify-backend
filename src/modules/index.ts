@@ -30,6 +30,7 @@ import { findDmMongoId, ensureDmConversation } from '../lib/dmConversation';
 import { friendsRouter } from './friends/friends.routes';
 import { areFriends } from './friends/friends.service';
 import { callsRouter } from './calls/calls.routes';
+import { telemetryRouter } from './telemetry/telemetry.routes';
 import { emitToUser } from '../sockets/io';
 import { scheduleCallTranscription } from './ai/whisper.service';
 import { hasActiveConsent } from './compliance/consent.service';
@@ -52,6 +53,7 @@ apiRouter.use(adminRouter);
 apiRouter.use(aiAgentRouter);
 apiRouter.use('/friends', friendsRouter);
 apiRouter.use('/calls', callsRouter);
+apiRouter.use(telemetryRouter);
 
 function roleRank(role: 'member' | 'admin' | 'owner'): number {
   if (role === 'owner') return 3;
@@ -555,10 +557,38 @@ apiRouter.patch('/chats/:id/disappearing-messages', requireAuth, async (req: Aut
   conv.disappearingMessagesUpdatedBy = new Types.ObjectId(req.auth!.userId);
   conv.disappearingMessagesUpdatedAt = new Date();
   await conv.save();
+
+  const timerLabel =
+    seconds === 0
+      ? 'off'
+      : seconds === 3600
+        ? '1 hour'
+        : seconds === 7200
+          ? '2 hours'
+          : seconds === 86400
+            ? '24 hours'
+            : seconds === 604800
+              ? '7 days'
+              : `${Math.round(seconds / 3600)} hours`;
+  const systemText =
+    seconds === 0 ? 'Message timer has been turned off' : `Message timer has been enabled (${timerLabel})`;
+
+  try {
+    await MessageModel.create({
+      conversationId: conv._id,
+      senderId: new Types.ObjectId(req.auth!.userId),
+      type: 'system',
+      content: { text: systemText, mediaType: 'system' },
+    });
+  } catch (error) {
+    console.warn('[disappearing-messages] system message failed', error);
+  }
+
   for (const member of conv.participants) {
     emitToUser(String(member.userId), 'conversation:settings', {
       conversationId: paramId,
-      disappearingMessagesSeconds: seconds
+      disappearingMessagesSeconds: seconds,
+      systemText
     });
   }
   return res.json({ success: true, data: { seconds } });
@@ -984,6 +1014,22 @@ apiRouter.get('/calls/history', requireAuth, async (req: AuthedRequest, res) => 
       };
     })
   });
+});
+
+apiRouter.delete('/calls/history/:id', requireAuth, async (req: AuthedRequest, res) => {
+  const userId = req.auth!.userId;
+  const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!callId || !Types.ObjectId.isValid(callId)) {
+    return res.status(400).json({ success: false, message: 'Invalid call id.' });
+  }
+  const deleted = await CallModel.findOneAndDelete({
+    _id: callId,
+    $or: [{ callerId: userId }, { receiverId: userId }],
+  });
+  if (!deleted) {
+    return res.status(404).json({ success: false, message: 'Call not found.' });
+  }
+  return res.json({ success: true });
 });
 
 apiRouter.delete('/calls/history', requireAuth, async (req: AuthedRequest, res) => {

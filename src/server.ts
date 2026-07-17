@@ -7,6 +7,7 @@ import { redis } from './config/redis';
 import { createSocketServer } from './sockets';
 import { startTelemetry } from './observability/otel';
 import { isTransactionalEmailConfigured } from './lib/email';
+import { startNotificationOutboxWorker } from './modules/notifications/notification-outbox.service';
 
 async function bootstrap() {
   // Force resolvers that support Atlas SRV lookups when local DNS is unreliable.
@@ -24,6 +25,7 @@ async function bootstrap() {
   const app = createApp();
   const httpServer = http.createServer(app);
   createSocketServer(httpServer);
+  startNotificationOutboxWorker();
 
   httpServer.listen(env.PORT, '0.0.0.0', () => {
     console.log(`Connectify backend running on :${env.PORT}`);

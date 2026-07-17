@@ -10,6 +10,7 @@ import { OtpModel } from './otp.model';
 import { RefreshTokenModel } from './refresh-token.model';
 import { normalizePhone } from '../../lib/phone';
 import { AuthSecurityEventModel } from './security-event.model';
+import { DevicePushTokenModel } from '../users/device-push-token.model';
 
 type RegisterInput = {
   name: string;
@@ -469,11 +470,19 @@ export async function refreshAccessToken(refreshToken: string) {
   };
 }
 
-export async function logoutUser(userId: string, refreshToken: string) {
+export async function logoutUser(userId: string, refreshToken: string, deviceId?: string) {
   const updated = await RefreshTokenModel.findOneAndUpdate(
     { userId, token: refreshToken, isRevoked: false },
     { isRevoked: true }
   );
+
+  if (deviceId) {
+    try {
+      await DevicePushTokenModel.deleteOne({ userId, deviceId });
+    } catch (error) {
+      console.warn('[auth.logout] failed to clear device push token', error);
+    }
+  }
 
   if (!updated) {
     // Treat logout as idempotent so clients can safely call it even if token was already rotated/revoked.
@@ -510,15 +519,30 @@ export async function forgotPassword(email: string) {
   });
 
   const emailResult = await sendPasswordResetEmail(user.email, code, user.name);
-  if (!emailResult.sent && env.NODE_ENV === 'production') {
+  if (!emailResult.sent) {
     console.error('[auth] forgot-password: reset email was not delivered', emailResult);
+    // Match signup/resend: do not claim success when the user exists but mail failed.
+    if (env.NODE_ENV === 'production' || emailResult.reason === 'request_failed') {
+      await OtpModel.deleteMany({ userId: user._id, type: 'reset_password', used: false });
+      const detail =
+        emailResult.reason === 'not_configured'
+          ? (emailResult.detail ??
+            'Email delivery is not configured on the server (set RESEND_API_KEY and EMAIL_FROM).')
+          : (emailResult.detail ?? 'Email provider rejected the send.');
+      return {
+        status: StatusCodes.SERVICE_UNAVAILABLE,
+        body: { success: false, message: `We could not send a reset email. ${detail}` }
+      };
+    }
   }
 
   return {
     status: StatusCodes.OK,
     body: {
       success: true,
-      message: 'If this email exists, a reset OTP has been sent.',
+      message: emailResult.sent
+        ? 'If this email exists, a reset OTP has been sent.'
+        : 'Email is not configured — use the dev code returned below (local only).',
       data: {
         ...(includeDevOtpInApiBody(emailResult) ? { otpCode: code } : {})
       }
@@ -550,8 +574,13 @@ export async function resetPassword(email: string, code: string, newPassword: st
   otp.used = true;
   await otp.save();
 
-  // Security hardening: revoke all active refresh tokens after password reset
+  // Security hardening: revoke all active refresh tokens and push endpoints after password reset
   await RefreshTokenModel.updateMany({ userId: user._id, isRevoked: false }, { isRevoked: true });
+  try {
+    await DevicePushTokenModel.deleteMany({ userId: user._id });
+  } catch (error) {
+    console.warn('[auth.resetPassword] failed to clear device push tokens', error);
+  }
 
   return { status: StatusCodes.OK, body: { success: true, message: 'Password reset successful' } };
 }

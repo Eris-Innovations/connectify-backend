@@ -7,33 +7,14 @@ import { requireAuth, type AuthedRequest } from '../../middleware/auth';
 import { env } from '../../config/env';
 import { isR2S3CompatibleAccessKeyId, R2_S3_CREDENTIALS_HELP } from '../../config/r2Credentials';
 import { buildPublicUrl, getR2Client, hasR2Config, presignGetUrl } from '../../lib/r2';
+import { extensionForMime, folderForMime, isAllowedMediaMime } from './media-mime';
 
 export const mediaRouter = Router();
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 } // 15MB
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB for video/docs
 });
-
-const extensionByMime: Record<string, string> = {
-  'image/jpeg': '.jpg',
-  'image/png': '.png',
-  'image/webp': '.webp',
-  'image/heic': '.heic',
-  'image/heif': '.heif',
-  'video/mp4': '.mp4',
-  'video/quicktime': '.mov',
-  'audio/m4a': '.m4a',
-  'audio/mp4': '.m4a',
-  'audio/x-m4a': '.m4a',
-  'audio/aac': '.aac',
-  'audio/webm': '.webm',
-  'audio/ogg': '.ogg',
-  'audio/3gpp': '.3gp',
-  'audio/3gp': '.3gp'
-};
-
-const allowedMime = new Set(Object.keys(extensionByMime));
 
 mediaRouter.post('/media/upload', requireAuth, upload.single('file'), async (req: AuthedRequest, res) => {
   const r2Client = getR2Client();
@@ -56,16 +37,14 @@ mediaRouter.post('/media/upload', requireAuth, upload.single('file'), async (req
     return res.status(400).json({ success: false, message: 'file is required' });
   }
 
-  if (!allowedMime.has(file.mimetype)) {
+  if (!isAllowedMediaMime(file.mimetype)) {
     return res.status(400).json({ success: false, message: 'Unsupported media type' });
   }
 
-  const ext = extensionByMime[file.mimetype] ?? (path.extname(file.originalname || '').toLowerCase() || '.bin');
-  const folder = file.mimetype.startsWith('video/')
-    ? 'videos'
-    : file.mimetype.startsWith('audio/')
-      ? 'audio'
-      : 'images';
+  const ext =
+    extensionForMime(file.mimetype) ??
+    (path.extname(file.originalname || '').toLowerCase() || '.bin');
+  const folder = folderForMime(file.mimetype);
   const key = `uploads/${folder}/${req.auth!.userId}/${Date.now()}-${randomUUID()}${ext}`;
 
   try {
@@ -111,4 +90,3 @@ mediaRouter.post('/media/upload', requireAuth, upload.single('file'), async (req
     }
   });
 });
-
