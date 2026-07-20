@@ -198,6 +198,47 @@ export async function upsertDevicePushTokenController(req: AuthedRequest, res: R
   return res.status(StatusCodes.OK).json({ success: true, data: { id: String(row!._id) } });
 }
 
+/** Backward-compatible Expo push registration used by older clients. */
+export async function upsertLegacyExpoPushTokenController(req: AuthedRequest, res: Response) {
+  const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  if (!token || !token.startsWith('ExponentPushToken[')) {
+    return res.status(StatusCodes.BAD_REQUEST).json({
+      success: false,
+      message: 'Invalid Expo push token.',
+      errorCode: 'INVALID_PUSH_TOKEN',
+      requestId: res.locals.requestId
+    });
+  }
+
+  await UserModel.updateOne(
+    { _id: req.auth!.userId },
+    { $addToSet: { expoPushTokens: token } }
+  );
+
+  await DevicePushTokenModel.deleteMany({
+    userId: { $ne: req.auth!.userId },
+    expoToken: token
+  });
+
+  await DevicePushTokenModel.findOneAndUpdate(
+    { userId: req.auth!.userId, deviceId: `expo:${token.slice(-24)}` },
+    {
+      $set: {
+        platform: req.body?.platform === 'android' || req.body?.platform === 'ios' ? req.body.platform : 'android',
+        expoToken: token,
+        enabled: true,
+        messageEnabled: true,
+        callEnabled: true,
+        lastSeenAt: new Date()
+      },
+      $setOnInsert: { fcmToken: '' }
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  return res.status(StatusCodes.OK).json({ success: true });
+}
+
 export async function deleteDevicePushTokenController(req: AuthedRequest, res: Response) {
   const deviceId = Array.isArray(req.params.deviceId) ? req.params.deviceId[0] : req.params.deviceId;
   if (!deviceId) {
