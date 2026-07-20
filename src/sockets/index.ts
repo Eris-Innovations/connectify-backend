@@ -21,12 +21,57 @@ import {
   setActiveCall,
 } from '../modules/calls/active-call.service';
 import { authorizeCallEnd } from '../modules/calls/call-authorization';
+import { CallModel } from '../modules/calls/call.model';
 import { setSocketIo, setUserAppForeground, clearUserAppForeground } from './io';
 import { enqueueNotification } from '../modules/notifications/notification-outbox.service';
 
 type SocketAuthPayload = {
   userId: string;
 };
+
+async function finalizeCallHistoryEntry(input: {
+  me: string;
+  other?: string;
+  reason?: string;
+  durationSec?: number;
+}) {
+  const other = input.other?.trim();
+  if (!other || !Types.ObjectId.isValid(input.me) || !Types.ObjectId.isValid(other)) return;
+
+  const reason = input.reason ?? 'ended';
+  const duration =
+    typeof input.durationSec === 'number'
+      ? Math.min(3600 * 6, Math.max(0, Math.floor(input.durationSec)))
+      : undefined;
+
+  const latest = await CallModel.findOne({
+    $or: [
+      { callerId: input.me, receiverId: other },
+      { callerId: other, receiverId: input.me },
+    ],
+  })
+    .sort({ createdAt: -1 })
+    .exec();
+
+  if (!latest) return;
+
+  const wasAnswered = reason === 'ended' || reason === 'remote_end' || reason === 'hangup';
+  const unanswered = reason === 'declined' || reason === 'timeout' || reason === 'busy' || reason === 'canceled';
+
+  if (unanswered) {
+    latest.type = 'missed';
+    latest.duration = 0;
+  } else if (wasAnswered && typeof duration === 'number') {
+    latest.duration = duration;
+    if (String(latest.callerId) === input.me) latest.type = 'outgoing';
+    else latest.type = 'incoming';
+  } else if (wasAnswered && (!latest.duration || latest.duration <= 0)) {
+    // Answered but client did not send duration — keep a non-zero floor so it is not classified as missed.
+    latest.duration = Math.max(latest.duration ?? 0, 1);
+  }
+
+  await latest.save();
+}
 
 /** Grace period before ending an active call after the last socket disconnects (transient blips). */
 const ACTIVE_CALL_DISCONNECT_GRACE_MS = 12_000;
@@ -751,7 +796,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
     socket.on('ice-candidate', () => {});
     socket.on('call:renegotiate', () => {});
 
-    socket.on('call:end', async (payload: { to: string; reason?: string; callId?: string }) => {
+    socket.on('call:end', async (payload: { to: string; reason?: string; callId?: string; durationSec?: number }) => {
       const me = socket.data.userId as string;
       const other = typeof payload.to === 'string' ? payload.to.trim() : '';
       const requestedCallId = typeof payload.callId === 'string' ? payload.callId : undefined;
@@ -779,6 +824,13 @@ export function createSocketServer(httpServer: HttpServer): Server {
       if (other) await clearPendingCall(other);
       if (other) await clearActiveCallPair(me, other);
       else await clearActiveCall(me);
+
+      void finalizeCallHistoryEntry({
+        me,
+        other: other || undefined,
+        reason: payload.reason,
+        durationSec: payload.durationSec,
+      });
 
       if (other) {
         io.to(`user:${other}`).emit('call:ended', {

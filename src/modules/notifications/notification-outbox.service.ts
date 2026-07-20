@@ -10,7 +10,8 @@ import {
   sendChatMessagePush,
   sendFriendRequestAcceptedPush,
   sendFriendRequestPush,
-  sendIncomingCallPush
+  sendIncomingCallPush,
+  type AndroidPushOutcome,
 } from '../../lib/expoPush';
 
 const MAX_ATTEMPTS = 6;
@@ -56,6 +57,18 @@ export async function enqueueNotification(input: {
   void processNotificationOutbox(25);
 }
 
+function assertPushDelivered(
+  android: AndroidPushOutcome,
+  iosOrExpoFallbackCount: number,
+  label: string
+): void {
+  if (android.skipReason === 'opted_out') return;
+  if (android.successCount > 0 || iosOrExpoFallbackCount > 0) return;
+  throw new Error(
+    `push_zero_success:${label}:${android.skipReason ?? 'no_targets'}`
+  );
+}
+
 async function deliver(row: {
   kind: OutboxKind;
   userId: Types.ObjectId;
@@ -66,13 +79,14 @@ async function deliver(row: {
   const eventId = row.eventId;
   switch (row.kind) {
     case 'call': {
-      await sendAndroidIncomingCallPush(userId, {
+      const android = await sendAndroidIncomingCallPush(userId, {
         callId: String(row.payload.callId),
         callerId: String(row.payload.callerId),
         callerName: String(row.payload.callerName ?? 'Unknown'),
         isVideo: Boolean(row.payload.isVideo),
         eventId,
       });
+      let expoDelivered = 0;
       const iosTokens = await getExpoPushTokensForUser(userId, { category: 'call', platform: 'ios' });
       if (iosTokens.length) {
         await sendIncomingCallPush(iosTokens, {
@@ -82,25 +96,51 @@ async function deliver(row: {
           isVideo: Boolean(row.payload.isVideo),
           eventId,
         });
+        expoDelivered += iosTokens.length;
       }
+      // Fallback: Android devices that only registered Expo tokens (no FCM yet).
+      if (android.successCount === 0 && android.skipReason !== 'opted_out') {
+        const androidExpo = await getExpoPushTokensForUser(userId, {
+          category: 'call',
+          platform: 'android',
+        });
+        if (androidExpo.length) {
+          await sendIncomingCallPush(androidExpo, {
+            callId: String(row.payload.callId),
+            callerId: String(row.payload.callerId),
+            callerName: String(row.payload.callerName ?? 'Unknown'),
+            isVideo: Boolean(row.payload.isVideo),
+            eventId,
+          });
+          expoDelivered += androidExpo.length;
+        }
+      }
+      assertPushDelivered(android, expoDelivered, 'call');
       return;
     }
     case 'call_cancel': {
-      await sendAndroidCallCancelPush(userId, { callId: String(row.payload.callId), eventId });
+      const android = await sendAndroidCallCancelPush(userId, {
+        callId: String(row.payload.callId),
+        eventId,
+      });
+      // Cancel is best-effort; do not fail the outbox if the ring never reached a device.
+      if (android.skipReason === 'no_firebase') {
+        throw new Error('push_zero_success:call_cancel:no_firebase');
+      }
       return;
     }
     case 'message': {
-      await sendAndroidChatMessagePush(userId, {
+      const android = await sendAndroidChatMessagePush(userId, {
         senderName: String(row.payload.senderName ?? 'Someone'),
         preview: String(row.payload.preview ?? ''),
         chatId: String(row.payload.chatId),
         messageId: String(row.payload.messageId),
         eventId,
       });
-      // A user can own Android and iOS devices simultaneously; deliver to both platforms.
+      let expoDelivered = 0;
       const iosTokens = await getExpoPushTokensForUser(userId, {
         category: 'message',
-        platform: 'ios'
+        platform: 'ios',
       });
       if (iosTokens.length) {
         await sendChatMessagePush(iosTokens, {
@@ -110,19 +150,38 @@ async function deliver(row: {
           messageId: String(row.payload.messageId),
           eventId,
         });
+        expoDelivered += iosTokens.length;
       }
+      if (android.successCount === 0 && android.skipReason !== 'opted_out') {
+        const androidExpo = await getExpoPushTokensForUser(userId, {
+          category: 'message',
+          platform: 'android',
+        });
+        if (androidExpo.length) {
+          await sendChatMessagePush(androidExpo, {
+            senderName: String(row.payload.senderName ?? 'Someone'),
+            preview: String(row.payload.preview ?? ''),
+            chatId: String(row.payload.chatId),
+            messageId: String(row.payload.messageId),
+            eventId,
+          });
+          expoDelivered += androidExpo.length;
+        }
+      }
+      assertPushDelivered(android, expoDelivered, 'message');
       return;
     }
     case 'friend_request': {
-      await sendAndroidFriendRequestPush(userId, {
+      const android = await sendAndroidFriendRequestPush(userId, {
         fromName: String(row.payload.fromName ?? 'Someone'),
         fromUserId: String(row.payload.fromUserId),
         connectionId: String(row.payload.connectionId),
         eventId,
       });
+      let expoDelivered = 0;
       const iosTokens = await getExpoPushTokensForUser(userId, {
         category: 'general',
-        platform: 'ios'
+        platform: 'ios',
       });
       if (iosTokens.length) {
         await sendFriendRequestPush(iosTokens, {
@@ -131,19 +190,37 @@ async function deliver(row: {
           connectionId: String(row.payload.connectionId),
           eventId,
         });
+        expoDelivered += iosTokens.length;
       }
+      if (android.successCount === 0 && android.skipReason !== 'opted_out') {
+        const androidExpo = await getExpoPushTokensForUser(userId, {
+          category: 'general',
+          platform: 'android',
+        });
+        if (androidExpo.length) {
+          await sendFriendRequestPush(androidExpo, {
+            fromName: String(row.payload.fromName ?? 'Someone'),
+            fromUserId: String(row.payload.fromUserId),
+            connectionId: String(row.payload.connectionId),
+            eventId,
+          });
+          expoDelivered += androidExpo.length;
+        }
+      }
+      assertPushDelivered(android, expoDelivered, 'friend_request');
       return;
     }
     case 'friend_request_accepted': {
-      await sendAndroidFriendAcceptedPush(userId, {
+      const android = await sendAndroidFriendAcceptedPush(userId, {
         accepterName: String(row.payload.accepterName ?? 'Someone'),
         accepterUserId: String(row.payload.accepterUserId),
         chatId: row.payload.chatId ? String(row.payload.chatId) : undefined,
         eventId,
       });
+      let expoDelivered = 0;
       const iosTokens = await getExpoPushTokensForUser(userId, {
         category: 'general',
-        platform: 'ios'
+        platform: 'ios',
       });
       if (iosTokens.length) {
         await sendFriendRequestAcceptedPush(iosTokens, {
@@ -152,7 +229,24 @@ async function deliver(row: {
           chatId: row.payload.chatId ? String(row.payload.chatId) : undefined,
           eventId,
         });
+        expoDelivered += iosTokens.length;
       }
+      if (android.successCount === 0 && android.skipReason !== 'opted_out') {
+        const androidExpo = await getExpoPushTokensForUser(userId, {
+          category: 'general',
+          platform: 'android',
+        });
+        if (androidExpo.length) {
+          await sendFriendRequestAcceptedPush(androidExpo, {
+            accepterName: String(row.payload.accepterName ?? 'Someone'),
+            accepterUserId: String(row.payload.accepterUserId),
+            chatId: row.payload.chatId ? String(row.payload.chatId) : undefined,
+            eventId,
+          });
+          expoDelivered += androidExpo.length;
+        }
+      }
+      assertPushDelivered(android, expoDelivered, 'friend_request_accepted');
       return;
     }
     default:
@@ -162,7 +256,6 @@ async function deliver(row: {
 
 export async function processNotificationOutbox(limit = 50): Promise<number> {
   const now = new Date();
-  // Reclaim rows left processing after a process crash or timeout.
   await NotificationOutboxModel.updateMany(
     {
       status: 'processing',
@@ -188,7 +281,6 @@ export async function processNotificationOutbox(limit = 50): Promise<number> {
 
   let processed = 0;
   for (const row of rows) {
-    // Atomically claim each row so concurrent API instances cannot deliver it twice.
     const claimed = await NotificationOutboxModel.findOneAndUpdate(
       { _id: row._id, status: { $in: ['pending', 'failed'] } },
       { $set: { status: 'processing' }, $inc: { attempts: 1 } },

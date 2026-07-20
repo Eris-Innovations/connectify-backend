@@ -4,18 +4,25 @@ Target host: `livekit.myconnectify.co` → `165.22.51.209`
 
 Deploy path on VPS: `/opt/livekit`
 
+This stack uses **Docker Compose for LiveKit + Redis**, with **host nginx** terminating TLS
+(Caddy is not used because nginx already owns `:80`/`:443` on this VPS).
+
 ## Quick deploy
 
 ```bash
 # On the VPS as root
 mkdir -p /opt/livekit
+# Copy this directory to /opt/livekit, then:
 cd /opt/livekit
-# Copy files from this directory, then:
-cp .env.example .env
-# Fill LIVEKIT_API_KEY / LIVEKIT_API_SECRET (generate with: openssl rand -hex 16 / openssl rand -hex 32)
-docker compose up -d
-systemctl enable --now livekit-docker
+bash ./install.sh
 ```
+
+`install.sh` will:
+- generate `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` into `/opt/livekit/.env` if missing
+- install Docker if needed
+- start LiveKit + Redis (Redis on `127.0.0.1:6380`)
+- enable nginx site + Certbot for `livekit.myconnectify.co`
+- enable `livekit-docker.service`
 
 Firewall ports: `80/tcp`, `443/tcp`, `7881/tcp`, `3478/udp`, `50000-60000/udp`.
 

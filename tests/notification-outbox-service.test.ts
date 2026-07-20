@@ -65,7 +65,11 @@ describe('notification outbox worker', () => {
     vi.clearAllMocks();
     mocks.updateMany.mockResolvedValue({ modifiedCount: 0 });
     mocks.updateOne.mockResolvedValue({ modifiedCount: 1 });
-    mocks.sendAndroidChatMessagePush.mockResolvedValue(1);
+    mocks.sendAndroidChatMessagePush.mockResolvedValue({ successCount: 1 });
+    mocks.sendAndroidIncomingCallPush.mockResolvedValue({ successCount: 1 });
+    mocks.sendAndroidCallCancelPush.mockResolvedValue({ successCount: 1 });
+    mocks.sendAndroidFriendRequestPush.mockResolvedValue({ successCount: 1 });
+    mocks.sendAndroidFriendAcceptedPush.mockResolvedValue({ successCount: 1 });
     mocks.getExpoPushTokensForUser.mockResolvedValue(['ExponentPushToken[ios]']);
     mocks.sendChatMessagePush.mockResolvedValue(undefined);
   });
@@ -139,6 +143,41 @@ describe('notification outbox worker', () => {
     );
     expect(notificationRetryDelayMs(1)).toBe(2_000);
     expect(notificationRetryDelayMs(10)).toBe(60_000);
+  });
+
+  it('retries when Android FCM reports zero success and no Expo fallback', async () => {
+    const row = {
+      _id: 'outbox-4',
+      userId: 'user-4',
+      kind: 'message',
+      payload: {
+        senderName: 'Ada',
+        preview: 'hello',
+        chatId: 'chat-4',
+        messageId: 'message-4',
+      },
+      status: 'pending',
+      attempts: 0,
+    };
+    mockRows([row]);
+    mockClaim({ ...row, status: 'processing', attempts: 1 });
+    mocks.sendAndroidChatMessagePush.mockResolvedValue({
+      successCount: 0,
+      skipReason: 'no_tokens',
+    });
+    mocks.getExpoPushTokensForUser.mockResolvedValue([]);
+
+    await expect(processNotificationOutbox()).resolves.toBe(0);
+    expect(mocks.updateOne).toHaveBeenLastCalledWith(
+      { _id: 'outbox-4', status: 'processing' },
+      {
+        $set: {
+          status: 'failed',
+          lastError: 'push_zero_success:message:no_tokens',
+          nextAttemptAt: expect.any(Date),
+        },
+      }
+    );
   });
 
   it('reclaims processing rows whose worker lease expired', async () => {

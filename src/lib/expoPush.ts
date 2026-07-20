@@ -12,6 +12,20 @@ import {
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 const EXPO_RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts';
 
+/** Result of an Android FCM send — outbox uses this to retry vs intentional skip. */
+export type AndroidPushOutcome = {
+  successCount: number;
+  skipReason?: 'opted_out' | 'no_firebase' | 'no_tokens';
+};
+
+function pushOk(successCount: number): AndroidPushOutcome {
+  return { successCount };
+}
+
+function pushSkip(skipReason: NonNullable<AndroidPushOutcome['skipReason']>): AndroidPushOutcome {
+  return { successCount: 0, skipReason };
+}
+
 export type ExpoPushMessage = {
   to: string;
   title: string;
@@ -178,14 +192,14 @@ function ensureFirebaseAdmin(): boolean {
 export async function sendAndroidIncomingCallPush(
   userId: string,
   payload: { callId: string; callerId: string; callerName: string; isVideo: boolean; eventId?: string }
-): Promise<number> {
+): Promise<AndroidPushOutcome> {
   if (!ensureFirebaseAdmin()) {
     console.warn('[fcm.call] Firebase Admin is not configured');
-    return 0;
+    return pushSkip('no_firebase');
   }
   const user = await UserModel.findById(userId).select('settings').lean();
   if (!user || user.settings?.notificationsEnabled === false || user.settings?.callNotificationsEnabled === false) {
-    return 0;
+    return pushSkip('opted_out');
   }
   const devices = await DevicePushTokenModel.find({
     userId,
@@ -197,7 +211,7 @@ export async function sendAndroidIncomingCallPush(
     .select('fcmToken')
     .lean();
   const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) return pushSkip('no_tokens');
 
   // Data-only so setBackgroundMessageHandler runs in background/terminated and can
   // present a single CallStyle / full-screen notification.
@@ -223,14 +237,14 @@ export async function sendAndroidIncomingCallPush(
     successCount: response.successCount,
     failureCount: response.failureCount
   });
-  return response.successCount;
+  return pushOk(response.successCount);
 }
 
 export async function sendAndroidCallCancelPush(
   userId: string,
   payload: { callId: string; eventId?: string }
-): Promise<number> {
-  if (!ensureFirebaseAdmin()) return 0;
+): Promise<AndroidPushOutcome> {
+  if (!ensureFirebaseAdmin()) return pushSkip('no_firebase');
   const devices = await DevicePushTokenModel.find({
     userId,
     platform: 'android',
@@ -240,7 +254,7 @@ export async function sendAndroidCallCancelPush(
     .select('fcmToken')
     .lean();
   const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) return pushSkip('no_tokens');
   const response = await getMessaging().sendEachForMulticast({
     tokens,
     data: buildAndroidCallCancelData(payload),
@@ -249,16 +263,16 @@ export async function sendAndroidCallCancelPush(
       ttl: 30_000
     }
   });
-  return response.successCount;
+  return pushOk(response.successCount);
 }
 
 export async function sendAndroidFriendRequestPush(
   userId: string,
   payload: { fromName: string; fromUserId: string; connectionId: string; eventId?: string }
-): Promise<number> {
-  if (!ensureFirebaseAdmin()) return 0;
+): Promise<AndroidPushOutcome> {
+  if (!ensureFirebaseAdmin()) return pushSkip('no_firebase');
   const user = await UserModel.findById(userId).select('settings').lean();
-  if (!user || user.settings?.notificationsEnabled === false) return 0;
+  if (!user || user.settings?.notificationsEnabled === false) return pushSkip('opted_out');
   const devices = await DevicePushTokenModel.find({
     userId,
     platform: 'android',
@@ -268,7 +282,7 @@ export async function sendAndroidFriendRequestPush(
     .select('fcmToken')
     .lean();
   const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) return pushSkip('no_tokens');
   const response = await getMessaging().sendEachForMulticast({
     tokens,
     notification: {
@@ -291,16 +305,16 @@ export async function sendAndroidFriendRequestPush(
       }
     }
   });
-  return response.successCount;
+  return pushOk(response.successCount);
 }
 
 export async function sendAndroidFriendAcceptedPush(
   userId: string,
   payload: { accepterName: string; accepterUserId: string; chatId?: string; eventId?: string }
-): Promise<number> {
-  if (!ensureFirebaseAdmin()) return 0;
+): Promise<AndroidPushOutcome> {
+  if (!ensureFirebaseAdmin()) return pushSkip('no_firebase');
   const user = await UserModel.findById(userId).select('settings').lean();
-  if (!user || user.settings?.notificationsEnabled === false) return 0;
+  if (!user || user.settings?.notificationsEnabled === false) return pushSkip('opted_out');
   const devices = await DevicePushTokenModel.find({
     userId,
     platform: 'android',
@@ -310,7 +324,7 @@ export async function sendAndroidFriendAcceptedPush(
     .select('fcmToken')
     .lean();
   const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) return pushSkip('no_tokens');
   const response = await getMessaging().sendEachForMulticast({
     tokens,
     notification: {
@@ -333,20 +347,20 @@ export async function sendAndroidFriendAcceptedPush(
       }
     }
   });
-  return response.successCount;
+  return pushOk(response.successCount);
 }
 
 export async function sendAndroidChatMessagePush(
   userId: string,
   payload: { senderName: string; preview: string; chatId: string; messageId: string; eventId?: string }
-): Promise<number> {
+): Promise<AndroidPushOutcome> {
   if (!ensureFirebaseAdmin()) {
     console.warn('[fcm.message] Firebase Admin is not configured');
-    return 0;
+    return pushSkip('no_firebase');
   }
   const user = await UserModel.findById(userId).select('settings').lean();
   if (!user || user.settings?.notificationsEnabled === false || user.settings?.messageNotificationsEnabled === false) {
-    return 0;
+    return pushSkip('opted_out');
   }
   const devices = await DevicePushTokenModel.find({
     userId,
@@ -358,7 +372,7 @@ export async function sendAndroidChatMessagePush(
     .select('fcmToken')
     .lean();
   const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) return pushSkip('no_tokens');
 
   const preview = payload.preview.trim().slice(0, 120) || 'New message';
   const response = await getMessaging().sendEachForMulticast({
@@ -404,7 +418,7 @@ export async function sendAndroidChatMessagePush(
     successCount: response.successCount,
     failureCount: response.failureCount
   });
-  return response.successCount;
+  return pushOk(response.successCount);
 }
 
 export async function sendIncomingCallPush(

@@ -1001,13 +1001,18 @@ apiRouter.get('/calls/history', requireAuth, async (req: AuthedRequest, res) => 
     data: logs.map((log) => {
       const isCaller = String(log.callerId) === userId;
       const otherId = isCaller ? String(log.receiverId) : String(log.callerId);
+      const duration = typeof log.duration === 'number' ? log.duration : 0;
+      // Classify from the viewer's perspective. Unanswered inbound calls are missed.
+      let type: 'incoming' | 'outgoing' | 'missed' = isCaller ? 'outgoing' : 'incoming';
+      if (!isCaller && duration <= 0) type = 'missed';
+      else if (log.type === 'missed' && !isCaller) type = 'missed';
       return {
         id: String(log._id),
         userId: otherId,
         userName: names.get(otherId) ?? 'Unknown',
-        type: isCaller ? 'outgoing' : 'incoming',
+        type,
         timestamp: log.createdAt,
-        duration: log.duration ?? 0,
+        duration,
         isVideo: log.isVideo,
         hasRecording: Boolean(log.recordingUrl),
         hasTranscript: callsWithTranscript.has(String(log._id))
@@ -1040,7 +1045,7 @@ apiRouter.delete('/calls/history', requireAuth, async (req: AuthedRequest, res) 
   return res.json({ success: true });
 });
 
-apiRouter.get('/search', requireAuth, async (req, res) => {
+apiRouter.get('/search', requireAuth, async (req: AuthedRequest, res) => {
   const qInput = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const q = clampSearchQuery(qInput);
   const type = typeof req.query.type === 'string' ? req.query.type : 'all';
@@ -1065,7 +1070,16 @@ apiRouter.get('/search', requireAuth, async (req, res) => {
     }
   }
 
-  const query = orConditions.length ? { $or: orConditions } : {};
+  const query: Record<string, unknown> = orConditions.length ? { $or: orConditions } : {};
+  // Hide users who opted out of discovery, unless the viewer is looking at themselves.
+  query.$and = [
+    {
+      $or: [
+        { 'settings.privacy': { $ne: 'private' } },
+        { _id: req.auth!.userId }
+      ]
+    }
+  ];
 
   const users = type === 'channels' ? [] : await UserModel.find(query).limit(20).lean();
   const channels =
