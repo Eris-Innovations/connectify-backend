@@ -55,26 +55,25 @@ export async function adminUserGalleryGet(req: Request, res: Response): Promise<
     .select('content conversationId createdAt')
     .lean();
 
-  const items: GalleryItem[] = (
-    await Promise.all(
-      messages.map(async (msg) => {
-        const rawUrl = typeof msg.content?.mediaUrl === 'string' ? msg.content.mediaUrl.trim() : '';
-        if (!rawUrl) return null;
-        const mediaType = isMediaType(msg.content?.mediaType) ? msg.content.mediaType : 'file';
-        const mediaUrl = await resolveStoredMediaUrl(rawUrl);
-        if (!mediaUrl) return null;
-        return {
-          kind: 'message' as const,
-          id: String(msg._id),
-          caption: typeof msg.content?.text === 'string' ? msg.content.text : '',
-          createdAt: msg.createdAt,
-          mediaType,
-          mediaUrls: [mediaUrl],
-          conversationId: String(msg.conversationId)
-        };
-      })
-    )
-  ).filter((item): item is GalleryItem => item !== null);
+  const mapped = await Promise.all(
+    messages.map(async (msg): Promise<GalleryItem | null> => {
+      const rawUrl = typeof msg.content?.mediaUrl === 'string' ? msg.content.mediaUrl.trim() : '';
+      if (!rawUrl) return null;
+      const mediaType = isMediaType(msg.content?.mediaType) ? msg.content.mediaType : 'file';
+      const mediaUrl = await resolveStoredMediaUrl(rawUrl);
+      if (!mediaUrl) return null;
+      return {
+        kind: 'message',
+        id: String(msg._id),
+        caption: typeof msg.content?.text === 'string' ? msg.content.text : '',
+        createdAt: msg.createdAt,
+        mediaType,
+        mediaUrls: [mediaUrl],
+        conversationId: String(msg.conversationId)
+      };
+    })
+  );
+  const items: GalleryItem[] = mapped.filter((item): item is GalleryItem => item !== null);
 
   const avatarRaw = typeof user.avatar === 'string' ? user.avatar.trim() : '';
   const avatarUrl = avatarRaw ? await resolveStoredMediaUrl(avatarRaw) : '';

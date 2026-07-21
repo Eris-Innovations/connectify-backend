@@ -1,4 +1,4 @@
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, S3Client, type S3ClientConfig } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from '../config/env';
 
@@ -15,7 +15,7 @@ export function getR2Client(): S3Client | null {
     if (!hasR2Config || !env.R2_ENDPOINT || !env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) {
       r2ClientSingleton = null;
     } else {
-      r2ClientSingleton = new S3Client({
+      const config: S3ClientConfig = {
         region: 'auto',
         endpoint: env.R2_ENDPOINT,
         forcePathStyle: true,
@@ -26,7 +26,8 @@ export function getR2Client(): S3Client | null {
         // Newer AWS SDK defaults break R2 signed GETs unless checksums are opt-in.
         requestChecksumCalculation: 'WHEN_REQUIRED',
         responseChecksumValidation: 'WHEN_REQUIRED'
-      } as ConstructorParameters<typeof S3Client>[0]);
+      };
+      r2ClientSingleton = new S3Client(config);
     }
   }
   return r2ClientSingleton;
