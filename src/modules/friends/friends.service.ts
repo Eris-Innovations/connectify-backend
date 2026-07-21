@@ -110,7 +110,7 @@ export async function listFriends(userId: string) {
 export async function sendFriendRequest(
   fromUserId: string,
   targetUserId: string
-): Promise<ServiceResult<{ id: string; status: FriendRelationship }>> {
+): Promise<ServiceResult<{ id: string; status: FriendRelationship; created: boolean; notifyEpoch: number }>> {
   if (!Types.ObjectId.isValid(targetUserId)) {
     return { ok: false, status: StatusCodes.BAD_REQUEST, message: 'Invalid user id' };
   }
@@ -134,7 +134,12 @@ export async function sendFriendRequest(
       if (String(existing.initiatedBy) === fromUserId) {
         return {
           ok: true,
-          data: { id: String(existing._id), status: 'pending_outgoing' }
+          data: {
+            id: String(existing._id),
+            status: 'pending_outgoing',
+            created: false,
+            notifyEpoch: existing.updatedAt instanceof Date ? existing.updatedAt.getTime() : Date.now()
+          }
         };
       }
       return {
@@ -147,7 +152,12 @@ export async function sendFriendRequest(
     existing.initiatedBy = new Types.ObjectId(fromUserId);
     existing.respondedAt = undefined;
     await existing.save();
-    return { ok: true, data: { id: String(existing._id), status: 'pending_outgoing' } };
+    const notifyEpoch =
+      existing.updatedAt instanceof Date ? existing.updatedAt.getTime() : Date.now();
+    return {
+      ok: true,
+      data: { id: String(existing._id), status: 'pending_outgoing', created: true, notifyEpoch }
+    };
   }
 
   const created = await FriendConnectionModel.create({
@@ -156,8 +166,13 @@ export async function sendFriendRequest(
     status: 'pending',
     initiatedBy: fromUserId
   });
+  const notifyEpoch =
+    created.createdAt instanceof Date ? created.createdAt.getTime() : Date.now();
 
-  return { ok: true, data: { id: String(created._id), status: 'pending_outgoing' } };
+  return {
+    ok: true,
+    data: { id: String(created._id), status: 'pending_outgoing', created: true, notifyEpoch }
+  };
 }
 
 export async function acceptFriendRequest(

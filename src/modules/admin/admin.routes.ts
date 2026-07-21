@@ -9,12 +9,19 @@ import { CallModel } from '../calls/call.model';
 import { AuditLogModel } from '../compliance/audit-log.model';
 import { ReportedContentModel } from './reported-content.model';
 import { RefreshTokenModel } from '../auth/refresh-token.model';
+import { DevicePushTokenModel } from '../users/device-push-token.model';
 import { adminUserGalleryGet } from './user-gallery.controller';
 import { adminMediaList } from './admin-media.controller';
 import { adminUserChatsList, adminChatMessagesGet } from './user-chats.controller';
-import { TranscriptModel } from '../ai/transcript.model';
 import { clampSearchQuery, escapeMongoRegex } from '../../lib/mongoRegex';
 import { canAdminAccessUser, requireAdminCapability } from './access';
+import { createBroadcastAnnouncement } from './broadcast.service';
+import {
+  getMemberVoiceActivity,
+  getRecentVoiceActivity,
+  mapActivityItemToApiRow,
+  resolveMemberUserIds
+} from './admin-transcripts.service';
 
 export const adminRouter = Router();
 
@@ -82,7 +89,21 @@ adminRouter.get('/admin/analytics/overview', requireAuth, async (req: AuthedRequ
   const thirtyDaysAgo = new Date(now - 30 * oneDayMs);
   const ninetyDaysAgo = new Date(now - 90 * oneDayMs);
 
-  const [dau, mau, messagesToday, callMinutesToday, signupsToday, signups30d, signups90d] = await Promise.all([
+  const [
+    dau,
+    mau,
+    messagesToday,
+    callMinutesToday,
+    signupsToday,
+    signups30d,
+    signups90d,
+    totalMembers,
+    totalStaff,
+    verifiedMembers,
+    suspendedMembers,
+    completedProfiles,
+    platformRows
+  ] = await Promise.all([
     UserModel.countDocuments({ updatedAt: { $gte: new Date(now - oneDayMs) } }),
     UserModel.countDocuments({ updatedAt: { $gte: thirtyDaysAgo } }),
     MessageModel.countDocuments({ createdAt: { $gte: new Date(now - oneDayMs) } }),
@@ -100,8 +121,28 @@ adminRouter.get('/admin/analytics/overview', requireAuth, async (req: AuthedRequ
       { $match: { createdAt: { $gte: ninetyDaysAgo } } },
       { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, value: { $sum: 1 } } },
       { $sort: { _id: 1 } }
+    ]),
+    UserModel.countDocuments({ role: 'user' }),
+    UserModel.countDocuments({ role: { $in: ['admin', 'super_admin', 'moderator', 'analyst'] } }),
+    UserModel.countDocuments({ role: 'user', isVerified: true }),
+    UserModel.countDocuments({ role: 'user', isSuspended: true }),
+    UserModel.countDocuments({ role: 'user', hasCompletedProfile: true }),
+    // Product currently ships Android only — ignore leftover iOS tokens in analytics.
+    DevicePushTokenModel.aggregate([
+      { $match: { enabled: true, platform: 'android' } },
+      { $group: { _id: '$platform', count: { $sum: 1 } } }
     ])
   ]);
+
+  const androidDevices = Number(platformRows?.[0]?.count ?? 0);
+  const platformMix = [
+    {
+      platform: 'android',
+      label: 'Android',
+      count: androidDevices,
+      percent: androidDevices > 0 ? 100 : 0
+    }
+  ];
 
   return res.json({
     success: true,
@@ -112,7 +153,13 @@ adminRouter.get('/admin/analytics/overview', requireAuth, async (req: AuthedRequ
       callMinutesPerDay: Math.round(Number(callMinutesToday?.[0]?.minutes ?? 0)),
       newSignupsToday: signupsToday,
       signups30d,
-      signups90d
+      signups90d,
+      totalMembers,
+      totalStaff,
+      verifiedMembers,
+      suspendedMembers,
+      completedProfiles,
+      platformMix
     }
   });
 });
@@ -329,10 +376,111 @@ adminRouter.post('/admin/moderation/reports/:id/action', requireAuth, async (req
   return res.json({ success: true, data: { id: String(report._id), status: report.status } });
 });
 
+adminRouter.get('/admin/broadcasts', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'announcements');
+  if (!actor) return;
+
+  const broadcasts = await (await import('./broadcast.model')).BroadcastAnnouncementModel.find()
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean();
+
+  return res.json({
+    success: true,
+    data: broadcasts.map((item) => ({
+      id: String(item._id),
+      title: item.title,
+      body: item.body,
+      targetGroup: item.targetGroup,
+      audienceCount: item.audienceCount,
+      deliveredCount: item.deliveredCount,
+      status: item.status,
+      createdAt: item.createdAt
+    }))
+  });
+});
+
+adminRouter.post('/admin/broadcasts', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'announcements');
+  if (!actor) return;
+
+  const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
+  const body = typeof req.body.body === 'string' ? req.body.body.trim() : '';
+  const targetGroup = typeof req.body.targetGroup === 'string' ? req.body.targetGroup : 'all';
+  const targetUserIds = Array.isArray(req.body.targetUserIds)
+    ? req.body.targetUserIds.filter((item: unknown): item is string => typeof item === 'string')
+    : [];
+
+  if (!title || !body) {
+    return res.status(400).json({ success: false, message: 'title and body are required' });
+  }
+
+  const created = await createBroadcastAnnouncement({
+    createdByUserId: req.auth!.userId,
+    title,
+    body,
+    targetGroup: targetGroup === 'verified' || targetGroup === 'creators' || targetGroup === 'custom' ? targetGroup : 'all',
+    targetUserIds
+  });
+
+  return res.status(201).json({
+    success: true,
+    data: {
+      id: String(created._id),
+      title: created.title,
+      body: created.body,
+      targetGroup: created.targetGroup,
+      status: created.status,
+      createdAt: created.createdAt
+    }
+  });
+});
+
 adminRouter.get('/admin/admin-users', requireAuth, async (req: AuthedRequest, res) => {
   const actor = await requireAdminCapability(req, res, 'admin_management');
   if (!actor) return;
   return res.json({ success: true, data: await listAdminUsers() });
+});
+
+adminRouter.get('/admin/audit', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'admin_management');
+  if (!actor) return;
+
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+  const logs = await AuditLogModel.find().sort({ createdAt: -1 }).limit(limit).lean();
+
+  const actorIds = [...new Set(logs.map((log) => String(log.actorUserId)).filter((id) => Types.ObjectId.isValid(id)))];
+  const actors = actorIds.length
+    ? await UserModel.find({ _id: { $in: actorIds.map((id) => new Types.ObjectId(id)) } })
+        .select('name username')
+        .lean()
+    : [];
+  const actorById = new Map(actors.map((u) => [String(u._id), u]));
+
+  const humanizeAction = (action: string) => action.replace(/_/g, ' ');
+  const describe = (metadata: Record<string, unknown> | undefined): string => {
+    if (!metadata || typeof metadata !== 'object') return '';
+    const entries = Object.entries(metadata).filter(([, value]) => value !== undefined && value !== null && value !== '');
+    if (entries.length === 0) return '';
+    return entries
+      .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.length : String(value)}`)
+      .join(' · ');
+  };
+
+  return res.json({
+    success: true,
+    data: logs.map((log) => {
+      const actorDoc = actorById.get(String(log.actorUserId));
+      return {
+        id: String(log._id),
+        actorName: actorDoc?.name ?? actorDoc?.username ?? 'System',
+        action: humanizeAction(log.action),
+        target: log.targetId ? `${log.targetType} ${log.targetId}` : log.targetType,
+        detail: describe(log.metadata as Record<string, unknown> | undefined) || '—',
+        createdAt: log.createdAt
+      };
+    })
+  });
 });
 
 adminRouter.post('/admin/admin-users', requireAuth, async (req: AuthedRequest, res) => {
@@ -551,40 +699,68 @@ adminRouter.get('/admin/transcripts', requireAuth, async (req: AuthedRequest, re
   if (!actor) return;
 
   const userId = typeof req.query.userId === 'string' ? req.query.userId.trim() : '';
+  const member = typeof req.query.member === 'string' ? clampSearchQuery(req.query.member.trim()) : '';
+  const q = typeof req.query.q === 'string' ? clampSearchQuery(req.query.q.trim()) : '';
+  const kind = typeof req.query.kind === 'string' ? req.query.kind.trim() : '';
+  const source = typeof req.query.source === 'string' ? req.query.source.trim() : '';
+  const direction = typeof req.query.direction === 'string' ? req.query.direction.trim() : '';
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 80));
-  const filter =
-    userId && Types.ObjectId.isValid(userId) ? { userId: new Types.ObjectId(userId) } : ({} as Record<string, unknown>);
-  const rows = await TranscriptModel.find(filter).sort({ createdAt: -1 }).limit(limit).lean();
-  const uids = [...new Set(rows.map((r) => r.userId).filter(Boolean).map((id) => String(id)))];
-  const users =
-    uids.length > 0
-      ? await UserModel.find({ _id: { $in: uids.map((id) => new Types.ObjectId(id)) } })
-          .select('name username email')
-          .lean()
-      : [];
-  const map = new Map(users.map((u) => [String(u._id), u]));
+
+  const resolvedUserIds = await resolveMemberUserIds(member, userId);
+
+  if (member || userId) {
+    // Keep only the members this admin is allowed to view. Searching by name can
+    // resolve to several accounts (including staff); skip inaccessible ones instead
+    // of failing the whole request with a 403.
+    const accessibleUserIds: string[] = [];
+    for (const uid of resolvedUserIds) {
+      if (await canAdminAccessUser(actor, uid)) {
+        accessibleUserIds.push(uid);
+      }
+    }
+
+    if (accessibleUserIds.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        meta: { total: 0, limit, returned: 0, scope: 'member_activity', userIds: [] }
+      });
+    }
+
+    const { items, total } = await getMemberVoiceActivity({
+      userIds: accessibleUserIds,
+      kind: kind || undefined,
+      source: source || undefined,
+      q: q || undefined,
+      direction: direction || undefined,
+      limit
+    });
+
+    return res.json({
+      success: true,
+      meta: {
+        total,
+        limit,
+        returned: items.length,
+        scope: 'member_activity',
+        userIds: accessibleUserIds
+      },
+      data: items.map(mapActivityItemToApiRow)
+    });
+  }
+
+  const { items, total } = await getRecentVoiceActivity({
+    kind: kind || undefined,
+    source: source || undefined,
+    q: q || undefined,
+    direction: direction || undefined,
+    limit
+  });
+
   return res.json({
     success: true,
-    data: rows.map((r) => {
-      const u = r.userId ? map.get(String(r.userId)) : undefined;
-      return {
-        id: String(r._id),
-        userId: r.userId ? String(r.userId) : null,
-        userName: u?.name ?? null,
-        username: u?.username ?? null,
-        email: u?.email ?? null,
-        kind: r.kind ?? 'call',
-        source: r.source,
-        language: r.language,
-        rawText: r.rawText,
-        mediaUrl: r.mediaUrl ?? null,
-        messageId: r.messageId ? String(r.messageId) : null,
-        callSessionId: r.callSessionId ? String(r.callSessionId) : null,
-        conversationId: r.conversationId ? String(r.conversationId) : null,
-        whisperModel: r.whisperModel ?? null,
-        createdAt: r.createdAt
-      };
-    })
+    meta: { total, limit, returned: items.length, scope: 'transcripts' },
+    data: items.map(mapActivityItemToApiRow)
   });
 });
 
@@ -600,30 +776,24 @@ adminRouter.get('/admin/users/:userId/transcripts', requireAuth, async (req: Aut
     return res.status(403).json({ success: false, message: 'You cannot access this user' });
   }
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 80));
-  const rows = await TranscriptModel.find({ userId: new Types.ObjectId(uid) })
-    .sort({ createdAt: -1 })
-    .limit(limit)
-    .lean();
-  const user = await UserModel.findById(uid).select('name username email').lean();
+  const kind = typeof req.query.kind === 'string' ? req.query.kind.trim() : '';
+  const source = typeof req.query.source === 'string' ? req.query.source.trim() : '';
+  const q = typeof req.query.q === 'string' ? clampSearchQuery(req.query.q.trim()) : '';
+  const direction = typeof req.query.direction === 'string' ? req.query.direction.trim() : '';
+
+  const { items, total } = await getMemberVoiceActivity({
+    userIds: [uid],
+    kind: kind || undefined,
+    source: source || undefined,
+    q: q || undefined,
+    direction: direction || undefined,
+    limit
+  });
+
   return res.json({
     success: true,
-    data: rows.map((r) => ({
-      id: String(r._id),
-      userId: r.userId ? String(r.userId) : null,
-      userName: user?.name ?? null,
-      username: user?.username ?? null,
-      email: user?.email ?? null,
-      kind: r.kind ?? 'call',
-      source: r.source,
-      language: r.language,
-      rawText: r.rawText,
-      mediaUrl: r.mediaUrl ?? null,
-      messageId: r.messageId ? String(r.messageId) : null,
-      callSessionId: r.callSessionId ? String(r.callSessionId) : null,
-      conversationId: r.conversationId ? String(r.conversationId) : null,
-      whisperModel: r.whisperModel ?? null,
-      createdAt: r.createdAt
-    }))
+    meta: { total, limit, returned: items.length, scope: 'member_activity', userIds: [uid] },
+    data: items.map(mapActivityItemToApiRow)
   });
 });
 
@@ -651,8 +821,10 @@ adminRouter.get('/admin/users', requireAuth, async (req: AuthedRequest, res) => 
     .limit(300)
     .populate('assignedAdminId', 'name email')
     .lean();
+  const total = await UserModel.countDocuments(query);
   return res.json({
     success: true,
+    meta: { total, returned: users.length, limit: 300 },
     data: users.map((user) => ({
       id: String(user._id),
       name: user.name,

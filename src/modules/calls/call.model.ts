@@ -6,7 +6,11 @@ const callSchema = new Schema(
     receiverId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     type: { type: String, enum: ['incoming', 'outgoing', 'missed'], required: true },
     isVideo: { type: Boolean, default: false },
-    duration: { type: Number, default: 0 }
+    duration: { type: Number, default: 0 },
+    /** R2 URL or key when a call recording was uploaded for transcription. */
+    recordingUrl: { type: String, default: '' },
+    /** User who uploaded the recording (caller or receiver). */
+    recordingUploadedBy: { type: Schema.Types.ObjectId, ref: 'User', sparse: true }
   },
   { timestamps: true }
 );

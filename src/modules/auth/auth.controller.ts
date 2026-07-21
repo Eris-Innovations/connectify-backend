@@ -21,6 +21,7 @@ import {
 } from './auth.service';
 import type { AuthedRequest } from '../../middleware/auth';
 import type { ZodError } from 'zod';
+import type { AuthRequestMetadata } from './auth.service';
 
 function validationFailure(res: Response, error: ZodError) {
   const fields: Record<string, string[]> = {};
@@ -37,12 +38,21 @@ function validationFailure(res: Response, error: ZodError) {
   });
 }
 
+function requestMetadata(req: Request): AuthRequestMetadata {
+  return {
+    ipAddress: req.ip || '',
+    userAgent: req.get('user-agent') || '',
+    platform: req.get('x-connectify-platform') || '',
+    appVersion: req.get('x-connectify-app-version') || ''
+  };
+}
+
 export async function registerController(req: Request, res: Response) {
   const parsed = registerSchema.safeParse({ body: req.body });
   if (!parsed.success) {
     return validationFailure(res, parsed.error);
   }
-  const result = await registerUser(parsed.data.body);
+  const result = await registerUser(parsed.data.body, requestMetadata(req));
   return res.status(result.status).json(result.body);
 }
 
@@ -69,7 +79,7 @@ export async function loginController(req: Request, res: Response) {
   if (!parsed.success) {
     return validationFailure(res, parsed.error);
   }
-  const result = await loginUser(parsed.data.body);
+  const result = await loginUser(parsed.data.body, requestMetadata(req));
   return res.status(result.status).json(result.body);
 }
 
@@ -87,7 +97,11 @@ export async function logoutController(req: AuthedRequest, res: Response) {
   if (!parsed.success) {
     return validationFailure(res, parsed.error);
   }
-  const result = await logoutUser(req.auth!.userId, parsed.data.body.refreshToken);
+  const result = await logoutUser(
+    req.auth!.userId,
+    parsed.data.body.refreshToken,
+    parsed.data.body.deviceId
+  );
   return res.status(result.status).json(result.body);
 }
 

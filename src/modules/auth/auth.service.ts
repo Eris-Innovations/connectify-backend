@@ -9,6 +9,8 @@ import { UserModel } from '../users/user.model';
 import { OtpModel } from './otp.model';
 import { RefreshTokenModel } from './refresh-token.model';
 import { normalizePhone } from '../../lib/phone';
+import { AuthSecurityEventModel } from './security-event.model';
+import { DevicePushTokenModel } from '../users/device-push-token.model';
 
 type RegisterInput = {
   name: string;
@@ -23,8 +25,36 @@ type LoginInput = {
   password: string;
 };
 
+export type AuthRequestMetadata = {
+  ipAddress?: string;
+  userAgent?: string;
+  platform?: string;
+  appVersion?: string;
+};
+
 function sixDigitOtp(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function recordAuthSecurityEvent(input: {
+  event: 'register_attempt' | 'register_success' | 'login_success' | 'login_failed';
+  userId?: string;
+  email?: string;
+  meta?: AuthRequestMetadata;
+}) {
+  try {
+    await AuthSecurityEventModel.create({
+      userId: input.userId || undefined,
+      email: input.email?.trim().toLowerCase(),
+      event: input.event,
+      ipAddress: input.meta?.ipAddress?.trim().slice(0, 80) ?? '',
+      userAgent: input.meta?.userAgent?.trim().slice(0, 500) ?? '',
+      platform: input.meta?.platform?.trim().slice(0, 40) ?? '',
+      appVersion: input.meta?.appVersion?.trim().slice(0, 40) ?? ''
+    });
+  } catch (error) {
+    console.warn('[auth.security] event write failed', input.event, error);
+  }
 }
 
 /** Only expose OTP in API when email was not sent and Resend is not configured (local dev). */
@@ -84,7 +114,8 @@ async function revokeRefreshTokenInRedis(token: string) {
   }
 }
 
-export async function registerUser(input: RegisterInput) {
+export async function registerUser(input: RegisterInput, meta?: AuthRequestMetadata) {
+  await recordAuthSecurityEvent({ event: 'register_attempt', email: input.email, meta });
   const normalizedPhone = normalizePhone(input.phone ?? '');
   if (!normalizedPhone) {
     return {
@@ -173,6 +204,13 @@ export async function registerUser(input: RegisterInput) {
       };
     }
   }
+
+  await recordAuthSecurityEvent({
+    event: 'register_success',
+    userId: String(user._id),
+    email: user.email,
+    meta
+  });
 
   return {
     status: StatusCodes.CREATED,
@@ -324,14 +362,16 @@ export async function verifyOtp(userId: string, code: string) {
   };
 }
 
-export async function loginUser(input: LoginInput) {
+export async function loginUser(input: LoginInput, meta?: AuthRequestMetadata) {
   const user = await UserModel.findOne({ email: input.email.toLowerCase() });
   if (!user) {
+    await recordAuthSecurityEvent({ event: 'login_failed', email: input.email, meta });
     return { status: StatusCodes.UNAUTHORIZED, body: { success: false, message: 'Email or password is incorrect.', errorCode: 'INVALID_CREDENTIALS' } };
   }
 
   const valid = await bcrypt.compare(input.password, user.passwordHash);
   if (!valid) {
+    await recordAuthSecurityEvent({ event: 'login_failed', userId: String(user._id), email: user.email, meta });
     return { status: StatusCodes.UNAUTHORIZED, body: { success: false, message: 'Email or password is incorrect.', errorCode: 'INVALID_CREDENTIALS' } };
   }
   if (!user.isVerified) {
@@ -358,6 +398,7 @@ export async function loginUser(input: LoginInput) {
     expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
   });
   await storeRefreshTokenInRedis(refreshToken);
+  await recordAuthSecurityEvent({ event: 'login_success', userId: String(user._id), email: user.email, meta });
 
   return {
     status: StatusCodes.OK,
@@ -429,11 +470,19 @@ export async function refreshAccessToken(refreshToken: string) {
   };
 }
 
-export async function logoutUser(userId: string, refreshToken: string) {
+export async function logoutUser(userId: string, refreshToken: string, deviceId?: string) {
   const updated = await RefreshTokenModel.findOneAndUpdate(
     { userId, token: refreshToken, isRevoked: false },
     { isRevoked: true }
   );
+
+  if (deviceId) {
+    try {
+      await DevicePushTokenModel.deleteOne({ userId, deviceId });
+    } catch (error) {
+      console.warn('[auth.logout] failed to clear device push token', error);
+    }
+  }
 
   if (!updated) {
     // Treat logout as idempotent so clients can safely call it even if token was already rotated/revoked.
@@ -470,15 +519,30 @@ export async function forgotPassword(email: string) {
   });
 
   const emailResult = await sendPasswordResetEmail(user.email, code, user.name);
-  if (!emailResult.sent && env.NODE_ENV === 'production') {
+  if (!emailResult.sent) {
     console.error('[auth] forgot-password: reset email was not delivered', emailResult);
+    // Match signup/resend: do not claim success when the user exists but mail failed.
+    if (env.NODE_ENV === 'production' || emailResult.reason === 'request_failed') {
+      await OtpModel.deleteMany({ userId: user._id, type: 'reset_password', used: false });
+      const detail =
+        emailResult.reason === 'not_configured'
+          ? (emailResult.detail ??
+            'Email delivery is not configured on the server (set RESEND_API_KEY and EMAIL_FROM).')
+          : (emailResult.detail ?? 'Email provider rejected the send.');
+      return {
+        status: StatusCodes.SERVICE_UNAVAILABLE,
+        body: { success: false, message: `We could not send a reset email. ${detail}` }
+      };
+    }
   }
 
   return {
     status: StatusCodes.OK,
     body: {
       success: true,
-      message: 'If this email exists, a reset OTP has been sent.',
+      message: emailResult.sent
+        ? 'If this email exists, a reset OTP has been sent.'
+        : 'Email is not configured — use the dev code returned below (local only).',
       data: {
         ...(includeDevOtpInApiBody(emailResult) ? { otpCode: code } : {})
       }
@@ -510,8 +574,13 @@ export async function resetPassword(email: string, code: string, newPassword: st
   otp.used = true;
   await otp.save();
 
-  // Security hardening: revoke all active refresh tokens after password reset
+  // Security hardening: revoke all active refresh tokens and push endpoints after password reset
   await RefreshTokenModel.updateMany({ userId: user._id, isRevoked: false }, { isRevoked: true });
+  try {
+    await DevicePushTokenModel.deleteMany({ userId: user._id });
+  } catch (error) {
+    console.warn('[auth.resetPassword] failed to clear device push tokens', error);
+  }
 
   return { status: StatusCodes.OK, body: { success: true, message: 'Password reset successful' } };
 }

@@ -32,6 +32,21 @@ function buildPasswordResetHtml(code: string, displayName?: string) {
 </html>`;
 }
 
+function buildPasswordResetText(code: string, displayName?: string) {
+  const greeting = displayName?.trim() ? `Hi ${displayName.trim()},` : 'Hi,';
+  return [
+    'Connectify',
+    '',
+    greeting,
+    '',
+    'Use this code to reset your password. It expires in 5 minutes.',
+    '',
+    code,
+    '',
+    'If you did not request a password reset, you can ignore this email.'
+  ].join('\n');
+}
+
 function buildSignupVerificationHtml(code: string, displayName?: string) {
   const safeName = displayName?.trim() ? escapeHtml(displayName.trim()) : '';
   const greeting = safeName ? `Hi ${safeName},` : 'Hi,';
@@ -48,10 +63,40 @@ function buildSignupVerificationHtml(code: string, displayName?: string) {
 </html>`;
 }
 
+function buildSignupVerificationText(code: string, displayName?: string) {
+  const greeting = displayName?.trim() ? `Hi ${displayName.trim()},` : 'Hi,';
+  return [
+    'Connectify',
+    '',
+    greeting,
+    '',
+    'Thanks for signing up. Enter this code in the app to verify your email. It expires in 5 minutes.',
+    '',
+    code,
+    '',
+    'If you did not create a Connectify account, you can ignore this email.'
+  ].join('\n');
+}
+
 export type SendEmailResult = { sent: true } | { sent: false; reason: 'not_configured' | 'request_failed'; detail?: string };
 
 const EMAIL_FROM_MISSING_DETAIL =
   'EMAIL_FROM is not set. Verify your domain at https://resend.com/domains, then set EMAIL_FROM to a sender on that domain (e.g. Connectify <noreply@yourdomain.com>).';
+
+/** Resend accepts bare emails; prefer `Name <email@domain>` when only an address is configured. */
+export function normalizeEmailFrom(raw: string): string {
+  const from = raw.trim();
+  if (!from) return from;
+  if (from.includes('<') && from.includes('>')) return from;
+  if (/^[^\s<>]+@[^\s<>]+$/.test(from)) return `Connectify <${from}>`;
+  return from;
+}
+
+function resolveEmailFrom(): { from?: string; missingDetail?: string } {
+  const raw = env.EMAIL_FROM?.trim();
+  if (!raw) return { missingDetail: EMAIL_FROM_MISSING_DETAIL };
+  return { from: normalizeEmailFrom(raw) };
+}
 
 /**
  * Password reset email via Resend (official SDK).
@@ -68,14 +113,14 @@ export async function sendPasswordResetEmail(to: string, code: string, displayNa
     return { sent: false, reason: 'not_configured' };
   }
 
-  const from = env.EMAIL_FROM?.trim();
+  const { from, missingDetail } = resolveEmailFrom();
   if (!from) {
     if (env.NODE_ENV !== 'production') {
       console.info(`[email] EMAIL_FROM not set — password reset email not sent (OTP for ${to}: ${code})`);
     } else {
       console.warn('[email] EMAIL_FROM not set — password reset email was not sent');
     }
-    return { sent: false, reason: 'not_configured', detail: EMAIL_FROM_MISSING_DETAIL };
+    return { sent: false, reason: 'not_configured', detail: missingDetail };
   }
 
   const resend = new Resend(apiKey);
@@ -85,7 +130,8 @@ export async function sendPasswordResetEmail(to: string, code: string, displayNa
       from,
       to: to.toLowerCase(),
       subject: 'Your Connectify password reset code',
-      html: buildPasswordResetHtml(code, displayName)
+      html: buildPasswordResetHtml(code, displayName),
+      text: buildPasswordResetText(code, displayName)
     });
 
     if (error) {
@@ -123,14 +169,14 @@ export async function sendSignupVerificationEmail(
     return { sent: false, reason: 'not_configured' };
   }
 
-  const from = env.EMAIL_FROM?.trim();
+  const { from, missingDetail } = resolveEmailFrom();
   if (!from) {
     if (env.NODE_ENV !== 'production') {
       console.info(`[email] EMAIL_FROM not set — signup verification email not sent (OTP for ${to}: ${code})`);
     } else {
       console.warn('[email] EMAIL_FROM not set — signup verification email was not sent');
     }
-    return { sent: false, reason: 'not_configured', detail: EMAIL_FROM_MISSING_DETAIL };
+    return { sent: false, reason: 'not_configured', detail: missingDetail };
   }
 
   const resend = new Resend(apiKey);
@@ -140,7 +186,8 @@ export async function sendSignupVerificationEmail(
       from,
       to: to.toLowerCase(),
       subject: 'Verify your Connectify email',
-      html: buildSignupVerificationHtml(code, displayName)
+      html: buildSignupVerificationHtml(code, displayName),
+      text: buildSignupVerificationText(code, displayName)
     });
 
     if (error) {

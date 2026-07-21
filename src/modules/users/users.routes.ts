@@ -5,9 +5,9 @@ import {
   deleteDevicePushTokenController,
   getMeController,
   getPublicUserController,
-  registerPushTokenController,
   updateMeController,
-  upsertDevicePushTokenController
+  upsertDevicePushTokenController,
+  upsertLegacyExpoPushTokenController
 } from './users.controller';
 import { asyncHandler } from '../../shared/errors';
 
@@ -16,7 +16,7 @@ export const usersRouter = Router();
 usersRouter.get('/me', requireAuth, asyncHandler(getMeController));
 usersRouter.put('/me', requireAuth, asyncHandler(updateMeController));
 usersRouter.post('/profile', requireAuth, asyncHandler(completeProfileController));
-usersRouter.post('/push-token', requireAuth, asyncHandler(registerPushTokenController));
+usersRouter.post('/push-token', requireAuth, asyncHandler(upsertLegacyExpoPushTokenController));
 usersRouter.post('/devices/push-token', requireAuth, asyncHandler(upsertDevicePushTokenController));
 usersRouter.delete('/devices/:deviceId/push-token', requireAuth, asyncHandler(deleteDevicePushTokenController));
 

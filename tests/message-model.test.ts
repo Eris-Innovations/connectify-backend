@@ -36,4 +36,27 @@ describe('message persistence models', () => {
     expect(message.replyTo?.previewText).toBe('Original text');
     expect(message.expiresAt).toEqual(expiresAt);
   });
+
+  it('stores per-user deletes and delete-for-everyone tombstones', () => {
+    const conversationId = new Types.ObjectId();
+    const senderId = new Types.ObjectId();
+    const deletedForUserId = new Types.ObjectId();
+    const deletedBy = new Types.ObjectId();
+    const deletedAt = new Date();
+    const message = new MessageModel({
+      conversationId,
+      senderId,
+      content: { text: '', mediaType: 'text' },
+      deletedForUserIds: [deletedForUserId],
+      deletedForEveryoneAt: deletedAt,
+      deletedBy,
+      deletedReplacementText: 'This message was deleted',
+    });
+
+    expect(message.validateSync()).toBeUndefined();
+    expect(String(message.deletedForUserIds?.[0])).toBe(String(deletedForUserId));
+    expect(message.deletedForEveryoneAt).toEqual(deletedAt);
+    expect(String(message.deletedBy)).toBe(String(deletedBy));
+    expect(message.deletedReplacementText).toBe('This message was deleted');
+  });
 });

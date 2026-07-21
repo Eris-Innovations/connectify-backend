@@ -13,13 +13,6 @@ import { getDmPeerUserId } from '../lib/dmConversation';
 import { areFriends } from '../modules/friends/friends.service';
 import { scheduleVoiceMessageTranscription } from '../modules/ai/whisper.service';
 import { resolveStoredMediaUrl } from '../lib/r2';
-import {
-  sendAndroidIncomingCallPush,
-  sendAndroidChatMessagePush,
-  sendIncomingCallPush,
-  getExpoPushTokensForUser,
-  sendChatMessagePush
-} from '../lib/expoPush';
 import { clearPendingCall, clearPendingCallByCaller, getPendingCall, storePendingCall } from '../modules/calls/pending-call.service';
 import {
   clearActiveCall,
@@ -27,11 +20,70 @@ import {
   getActiveCall,
   setActiveCall,
 } from '../modules/calls/active-call.service';
-import { setSocketIo, setUserAppForeground, clearUserAppForeground, shouldDeliverPushToUser } from './io';
+import { authorizeCallEnd } from '../modules/calls/call-authorization';
+import { CallModel } from '../modules/calls/call.model';
+import { setSocketIo, setUserAppForeground, clearUserAppForeground } from './io';
+import { enqueueNotification } from '../modules/notifications/notification-outbox.service';
 
 type SocketAuthPayload = {
   userId: string;
 };
+
+async function finalizeCallHistoryEntry(input: {
+  me: string;
+  other?: string;
+  reason?: string;
+  durationSec?: number;
+}) {
+  const other = input.other?.trim();
+  if (!other || !Types.ObjectId.isValid(input.me) || !Types.ObjectId.isValid(other)) return;
+
+  const reason = input.reason ?? 'ended';
+  const duration =
+    typeof input.durationSec === 'number'
+      ? Math.min(3600 * 6, Math.max(0, Math.floor(input.durationSec)))
+      : undefined;
+
+  const latest = await CallModel.findOne({
+    $or: [
+      { callerId: input.me, receiverId: other },
+      { callerId: other, receiverId: input.me },
+    ],
+  })
+    .sort({ createdAt: -1 })
+    .exec();
+
+  if (!latest) return;
+
+  const wasAnswered = reason === 'ended' || reason === 'remote_end' || reason === 'hangup';
+  const unanswered = reason === 'declined' || reason === 'timeout' || reason === 'busy' || reason === 'canceled';
+
+  if (unanswered) {
+    latest.type = 'missed';
+    latest.duration = 0;
+  } else if (wasAnswered && typeof duration === 'number') {
+    latest.duration = duration;
+    if (String(latest.callerId) === input.me) latest.type = 'outgoing';
+    else latest.type = 'incoming';
+  } else if (wasAnswered && (!latest.duration || latest.duration <= 0)) {
+    // Answered but client did not send duration — keep a non-zero floor so it is not classified as missed.
+    latest.duration = Math.max(latest.duration ?? 0, 1);
+  }
+
+  await latest.save();
+}
+
+/** Grace period before ending an active call after the last socket disconnects (transient blips). */
+const ACTIVE_CALL_DISCONNECT_GRACE_MS = 12_000;
+const pendingActiveCallEndTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelPendingActiveCallEnd(userId: string): void {
+  const timer = pendingActiveCallEndTimers.get(userId);
+  if (timer) {
+    clearTimeout(timer);
+    pendingActiveCallEndTimers.delete(userId);
+  }
+}
 
 export function createSocketServer(httpServer: HttpServer): Server {
   const io = new Server(httpServer, {
@@ -59,6 +111,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
     socket.join(userRoom);
 
     const userId = socket.data.userId as string;
+    cancelPendingActiveCallEnd(userId);
     setUserAppForeground(userId, true);
 
     socket.on('app:state', (payload: { state?: string }) => {
@@ -142,14 +195,11 @@ export function createSocketServer(httpServer: HttpServer): Server {
       for (const id of ids) {
         socket.join(`pw:${id}`);
       }
+      // Watcher's own showLastSeen only controls what *others* see about them —
+      // it must not hide everyone else's presence from this watcher.
       const states: { userId: string; online: boolean; hidden?: boolean; lastSeenAt?: string }[] = [];
-      const watcherAllows = await getShowLastSeenEnabled(userId);
       for (const id of ids) {
         try {
-          if (!watcherAllows) {
-            states.push({ userId: id, online: false, hidden: true });
-            continue;
-          }
           const v = await redis.get(`user:${id}:online`);
           const online = v ? true : isUserConnected(id);
           const peer = await UserModel.findById(id).select('lastSeenAt settings.showLastSeen').lean();
@@ -203,13 +253,32 @@ export function createSocketServer(httpServer: HttpServer): Server {
         });
       }
 
-      const activeCall = await clearActiveCall(userId);
-      if (activeCall?.otherUserId) {
-        io.to(`user:${activeCall.otherUserId}`).emit('call:ended', {
-          callId: activeCall.callId,
-          reason: 'unavailable',
-        });
-        await clearActiveCall(activeCall.otherUserId);
+      // Do not tear down an in-progress call on a brief socket blip — wait for grace, then re-check.
+      if (!stillOnline) {
+        cancelPendingActiveCallEnd(userId);
+        const graceTimer = setTimeout(() => {
+          pendingActiveCallEndTimers.delete(userId);
+          void (async () => {
+            if (isUserConnected(userId)) return;
+            const activeCall = await getActiveCall(userId);
+            if (!activeCall) return;
+            await clearActiveCall(userId);
+            if (activeCall.otherUserId) {
+              io.to(`user:${activeCall.otherUserId}`).emit('call:ended', {
+                callId: activeCall.callId,
+                reason: 'unavailable',
+              });
+              await clearActiveCall(activeCall.otherUserId);
+              cancelPendingActiveCallEnd(activeCall.otherUserId);
+            }
+            console.log('[socket.call.disconnect.grace.end]', {
+              userId,
+              callId: activeCall.callId,
+              otherUserId: activeCall.otherUserId,
+            });
+          })();
+        }, ACTIVE_CALL_DISCONNECT_GRACE_MS);
+        pendingActiveCallEndTimers.set(userId, graceTimer);
       }
     });
 
@@ -297,19 +366,59 @@ export function createSocketServer(httpServer: HttpServer): Server {
           ? new Date(now.getTime() + disappearingSeconds * 1000)
           : undefined;
 
-        const created = await MessageModel.create({
-          conversationId: dbConversationId,
-          senderId,
-          content: {
-            text,
-            mediaUrl: mediaUrl || undefined,
-            mediaType: mediaUrl ? mediaType : 'text',
-            metadata: metadataForDb
-          },
-          type: 'message',
-          replyTo,
-          expiresAt
-        });
+        const clientId =
+          typeof payload.clientId === 'string' && payload.clientId.trim()
+            ? payload.clientId.trim().slice(0, 120)
+            : undefined;
+
+        let created;
+        if (clientId) {
+          try {
+            created = await MessageModel.create({
+              conversationId: dbConversationId,
+              senderId,
+              clientId,
+              content: {
+                text,
+                mediaUrl: mediaUrl || undefined,
+                mediaType: mediaUrl ? mediaType : 'text',
+                metadata: metadataForDb
+              },
+              type: 'message',
+              replyTo,
+              expiresAt
+            });
+          } catch (error: any) {
+            if (error?.code === 11000) {
+              created = await MessageModel.findOne({ senderId, clientId });
+              if (!created) throw error;
+              socket.emit('message:ack', {
+                conversationId: rawConv,
+                messageId: String(created._id),
+                serverMessageId: String(created._id),
+                clientId,
+                createdAt: created.createdAt,
+                receivedAt: new Date().toISOString(),
+              });
+              return;
+            }
+            throw error;
+          }
+        } else {
+          created = await MessageModel.create({
+            conversationId: dbConversationId,
+            senderId,
+            content: {
+              text,
+              mediaUrl: mediaUrl || undefined,
+              mediaType: mediaUrl ? mediaType : 'text',
+              metadata: metadataForDb
+            },
+            type: 'message',
+            replyTo,
+            expiresAt
+          });
+        }
 
         if (mediaType === 'voice' && mediaUrl) {
           scheduleVoiceMessageTranscription({
@@ -384,9 +493,12 @@ export function createSocketServer(httpServer: HttpServer): Server {
         };
 
         socket.emit('message:ack', {
-          clientId: payload.clientId,
+          conversationId: rawConv,
+          messageId: String(created._id),
           serverMessageId: String(created._id),
-          receivedAt: now.toISOString()
+          clientId: payload.clientId,
+          createdAt: created.createdAt,
+          receivedAt: now.toISOString(),
         });
         console.log('[socket.message:ack]', {
           senderId,
@@ -413,6 +525,14 @@ export function createSocketServer(httpServer: HttpServer): Server {
           (pid) => pid !== senderId && isUserConnected(pid)
         );
         if (deliveredRecipients.length > 0) {
+          try {
+            await MessageModel.updateOne(
+              { _id: created._id },
+              { $set: { deliveredAt: new Date() } }
+            );
+          } catch {
+            /* best-effort */
+          }
           const deliveredPayload = {
             conversationId: rawConv,
             messageIds: [String(created._id)],
@@ -429,51 +549,23 @@ export function createSocketServer(httpServer: HttpServer): Server {
           });
         }
 
-        const pushRecipients = [...recipientIds].filter(
-          (pid) => pid !== senderId && shouldDeliverPushToUser(pid)
-        );
+        // Always target registered devices. Foreground clients suppress local tray duplicates.
+        const pushRecipients = [...recipientIds].filter((pid) => pid !== senderId);
         if (pushRecipients.length > 0) {
           const senderName = senderPreview.name || senderPreview.username || 'New message';
           for (const recipientId of pushRecipients) {
-            void (async () => {
-              const pushPayload = {
+            void enqueueNotification({
+              eventId: `message:${String(created._id)}:${recipientId}`,
+              userId: recipientId,
+              kind: 'message',
+              correlationId: String(created._id),
+              payload: {
                 senderName,
                 preview: previewText,
                 chatId: rawConv,
-                messageId: String(created._id),
-              };
-              const androidDelivered = await sendAndroidChatMessagePush(recipientId, pushPayload);
-              const iosTokens = await getExpoPushTokensForUser(recipientId, {
-                category: 'message',
-                platform: 'ios'
-              });
-              const androidFallbackTokens = androidDelivered === 0
-                ? await getExpoPushTokensForUser(recipientId, {
-                    category: 'message',
-                    platform: 'android'
-                  })
-                : [];
-              const tokens = [...iosTokens, ...androidFallbackTokens];
-              if (tokens.length === 0 && androidDelivered === 0) {
-                console.warn('[push.message] skipped — no tokens', {
-                  recipientId,
-                  conversationId: rawConv,
-                  messageId: String(created._id),
-                  socketConnected: isUserConnected(recipientId),
-                });
-                return;
+                messageId: String(created._id)
               }
-              if (tokens.length > 0) {
-                console.log('[push.message] sending Expo fallback/iOS', {
-                  recipientId,
-                  conversationId: rawConv,
-                  messageId: String(created._id),
-                  tokenCount: tokens.length,
-                  androidDelivered,
-                });
-                await sendChatMessagePush(tokens, pushPayload);
-              }
-            })();
+            });
           }
         }
       }
@@ -560,7 +652,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
       });
     });
 
-    socket.on('call:initiate', async (payload: { to: string; callerName?: string; offer: unknown }) => {
+    socket.on(
+      'call:initiate',
+      async (payload: { to: string; callerName?: string; isVideo?: boolean; offer?: unknown }) => {
       try {
         const callerId = socket.data.userId as string;
         const receiverId = typeof payload.to === 'string' ? payload.to.trim() : '';
@@ -577,15 +671,15 @@ export function createSocketServer(httpServer: HttpServer): Server {
           return;
         }
 
-        const offerSdp =
-          payload.offer && typeof payload.offer === 'object' && typeof (payload.offer as { sdp?: unknown }).sdp === 'string'
-            ? (payload.offer as { sdp: string }).sdp
-            : '';
-        if (!offerSdp.trim()) {
-          socket.emit('call:failed', { reason: 'invalid_offer' });
-          return;
+        // LiveKit media path: SDP offer is optional (legacy P2P clients may still send it).
+        let isVideo = Boolean(payload.isVideo);
+        if (payload.offer && typeof payload.offer === 'object') {
+          const offerSdp =
+            typeof (payload.offer as { sdp?: unknown }).sdp === 'string'
+              ? (payload.offer as { sdp: string }).sdp
+              : '';
+          if (offerSdp.includes('m=video')) isVideo = true;
         }
-        const isVideo = offerSdp.includes('m=video');
 
         const existing = await getPendingCall(receiverId);
         if (existing) {
@@ -609,7 +703,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
           callerId,
           callerName: payload.callerName ?? 'Unknown',
           isVideo,
-          offer: payload.offer,
+          ...(payload.offer !== undefined ? { offer: payload.offer } : {}),
         });
 
         const socketsInRoom = io.sockets.adapter.rooms.get(`user:${receiverId}`)?.size ?? 0;
@@ -629,60 +723,42 @@ export function createSocketServer(httpServer: HttpServer): Server {
           callId: pending.callId,
           room: `user:${receiverId}`,
           socketsInRoom,
+          media: 'livekit',
+          isVideo,
         });
 
         io.to(`user:${receiverId}`).emit('call:invitation', {
           callId: pending.callId,
           fromId: callerId,
           fromName: payload.callerName ?? 'Unknown',
-          offer: payload.offer,
           isVideo,
+          media: 'livekit',
+          ...(payload.offer !== undefined ? { offer: payload.offer } : {}),
         });
 
-        socket.emit('call:ringing', { callId: pending.callId, receiverId });
+        socket.emit('call:ringing', { callId: pending.callId, receiverId, media: 'livekit' });
 
-        if (!shouldDeliverPushToUser(receiverId)) {
-          console.log('[call:initiate] skip push — callee active in app', { receiverId, socketsInRoom });
-          return;
-        }
-
-        try {
-          const fcmDelivered = await sendAndroidIncomingCallPush(receiverId, {
+        // Always wake Android (data-only FCM) + iOS Expo via outbox retries.
+        // LiveKit JWTs are never included in push payloads.
+        void enqueueNotification({
+          eventId: `call:${pending.callId}:${receiverId}`,
+          userId: receiverId,
+          kind: 'call',
+          correlationId: pending.callId,
+          payload: {
             callId: pending.callId,
             callerId,
             callerName: payload.callerName ?? 'Unknown',
-            isVideo
-          });
-          const tokens = await getExpoPushTokensForUser(
-            receiverId,
-            fcmDelivered > 0 ? { category: 'call', platform: 'ios' } : { category: 'call' }
-          );
-          if (tokens.length > 0) {
-            console.log('[push.call] sending', {
-              receiverId,
-              callId: pending.callId,
-              tokenCount: tokens.length,
-              socketsInRoom,
-            });
-            await sendIncomingCallPush(tokens, {
-              callId: pending.callId,
-              callerId,
-              callerName: payload.callerName ?? 'Unknown',
-              isVideo,
-            });
-          } else if (fcmDelivered === 0) {
-            console.warn('[push.call] skipped — no tokens', { receiverId, callId: pending.callId, socketsInRoom });
-          }
-        } catch (err) {
-          console.warn('[push.call] send failed', receiverId, err);
-        }
+            isVideo,
+          },
+        });
       } catch (error) {
         console.error('[call:initiate] failed', error);
         socket.emit('call:failed', { reason: 'internal' });
       }
     });
 
-    socket.on('call:accept', async (payload: { to: string; answer: unknown; callId?: string }) => {
+    socket.on('call:accept', async (payload: { to: string; callId?: string; answer?: unknown }) => {
       try {
         const accepterId = socket.data.userId as string;
         const callerId = typeof payload.to === 'string' ? payload.to.trim() : '';
@@ -705,8 +781,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
         await setActiveCall(accepterId, pending.callId, callerId);
         await setActiveCall(callerId, pending.callId, accepterId);
         io.to(`user:${callerId}`).emit('call:accepted', {
-          answer: payload.answer,
           callId: pending.callId,
+          media: 'livekit',
+          ...(payload.answer !== undefined ? { answer: payload.answer } : {}),
         });
       } catch (error) {
         console.error('[call:accept] failed', error);
@@ -714,24 +791,69 @@ export function createSocketServer(httpServer: HttpServer): Server {
       }
     });
 
-    socket.on('ice-candidate', (payload: { to: string; candidate: unknown }) => {
-      const targetId = typeof payload.to === 'string' ? payload.to.trim() : '';
-      if (!targetId || !payload.candidate) return;
-      io.to(`user:${targetId}`).emit('ice-candidate', {
-        candidate: payload.candidate,
-      });
-    });
+    // Legacy P2P ICE/renegotiate — no-ops while LiveKit owns the media plane.
+    // Kept so older clients do not crash the socket handler; signals are dropped.
+    socket.on('ice-candidate', () => {});
+    socket.on('call:renegotiate', () => {});
 
-    socket.on('call:end', async (payload: { to: string; reason?: string; callId?: string }) => {
+    socket.on('call:end', async (payload: { to: string; reason?: string; callId?: string; durationSec?: number }) => {
       const me = socket.data.userId as string;
       const other = typeof payload.to === 'string' ? payload.to.trim() : '';
-      const cleared = await clearPendingCall(me);
+      const requestedCallId = typeof payload.callId === 'string' ? payload.callId : undefined;
+      const [active, pendingAsCallee, pendingAsCaller] = await Promise.all([
+        getActiveCall(me),
+        getPendingCall(me),
+        other ? getPendingCall(other) : Promise.resolve(null),
+      ]);
+
+      const authorization = authorizeCallEnd({
+        me,
+        other: other || undefined,
+        requestedCallId,
+        active,
+        pendingAsCallee,
+        pendingAsCaller,
+      });
+      if (!authorization.ok) {
+        socket.emit('call:error', { code: authorization.code });
+        return;
+      }
+      const callId = authorization.callId;
+
+      await clearPendingCall(me);
       if (other) await clearPendingCall(other);
-      await clearActiveCallPair(me, other);
+      if (other) await clearActiveCallPair(me, other);
+      else await clearActiveCall(me);
+
+      void finalizeCallHistoryEntry({
+        me,
+        other: other || undefined,
+        reason: payload.reason,
+        durationSec: payload.durationSec,
+      });
+
       if (other) {
         io.to(`user:${other}`).emit('call:ended', {
           reason: payload.reason ?? 'ended',
-          callId: payload.callId ?? cleared?.callId,
+          callId,
+        });
+        if (callId) {
+          void enqueueNotification({
+            eventId: `call_cancel:${callId}:${other}`,
+            userId: other,
+            kind: 'call_cancel',
+            correlationId: callId,
+            payload: { callId }
+          });
+        }
+      }
+      if (callId) {
+        void enqueueNotification({
+          eventId: `call_cancel:${callId}:${me}`,
+          userId: me,
+          kind: 'call_cancel',
+          correlationId: callId,
+          payload: { callId }
         });
       }
     });

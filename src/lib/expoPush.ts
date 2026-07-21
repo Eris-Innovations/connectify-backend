@@ -3,9 +3,28 @@ import { UserModel } from '../modules/users/user.model';
 import { DevicePushTokenModel } from '../modules/users/device-push-token.model';
 import { applicationDefault, cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
+import {
+  buildAndroidCallCancelData,
+  buildAndroidIncomingCallData,
+  buildAndroidIncomingCallMulticastOptions
+} from './fcmPayloads';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 const EXPO_RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts';
+
+/** Result of an Android FCM send — outbox uses this to retry vs intentional skip. */
+export type AndroidPushOutcome = {
+  successCount: number;
+  skipReason?: 'opted_out' | 'no_firebase' | 'no_tokens';
+};
+
+function pushOk(successCount: number): AndroidPushOutcome {
+  return { successCount };
+}
+
+function pushSkip(skipReason: NonNullable<AndroidPushOutcome['skipReason']>): AndroidPushOutcome {
+  return { successCount: 0, skipReason };
+}
 
 export type ExpoPushMessage = {
   to: string;
@@ -17,6 +36,7 @@ export type ExpoPushMessage = {
   channelId?: string;
   categoryId?: string;
   ttl?: number;
+  collapseId?: string;
 };
 
 function filterValidExpoTokens(tokens: string[]): string[] {
@@ -44,8 +64,7 @@ export async function sendExpoPush(messages: ExpoPushMessage[]): Promise<void> {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      console.warn('[expoPush] send failed', res.status, text.slice(0, 200));
-      return;
+      throw new Error(`Expo push HTTP ${res.status}: ${text.slice(0, 200)}`);
     }
     const body = (await res.json().catch(() => null)) as {
       data?: { status?: string; id?: string; details?: { error?: string } }[];
@@ -62,10 +81,15 @@ export async function sendExpoPush(messages: ExpoPushMessage[]): Promise<void> {
       .map((row, index) => row.details?.error === 'DeviceNotRegistered' ? tokens[index] : '')
       .filter(Boolean);
     if (invalidTokens.length > 0) {
-      await Promise.all([
-        DevicePushTokenModel.deleteMany({ expoToken: { $in: invalidTokens } }),
-        UserModel.updateMany({}, { $pull: { expoPushTokens: { $in: invalidTokens } } })
-      ]);
+      await DevicePushTokenModel.deleteMany({ expoToken: { $in: invalidTokens } });
+    }
+    const retryableErrors = errors.filter(
+      (row) => row.details?.error !== 'DeviceNotRegistered'
+    );
+    if (retryableErrors.length > 0) {
+      throw new Error(
+        `Expo push rejected ${retryableErrors.length} notification(s): ${JSON.stringify(retryableErrors).slice(0, 300)}`
+      );
     }
 
     const ticketToToken = new Map<string, string>();
@@ -79,6 +103,7 @@ export async function sendExpoPush(messages: ExpoPushMessage[]): Promise<void> {
     }
   } catch (err) {
     console.warn('[expoPush] send error', err);
+    throw err;
   }
 }
 
@@ -99,25 +124,10 @@ async function checkExpoReceipts(ticketToToken: Map<string, string>, headers: Re
       .map(([ticketId]) => ticketToToken.get(ticketId) ?? '')
       .filter(Boolean);
     if (invalidTokens.length > 0) {
-      await Promise.all([
-        DevicePushTokenModel.deleteMany({ expoToken: { $in: invalidTokens } }),
-        UserModel.updateMany({}, { $pull: { expoPushTokens: { $in: invalidTokens } } })
-      ]);
+      await DevicePushTokenModel.deleteMany({ expoToken: { $in: invalidTokens } });
     }
   } catch (error) {
     console.warn('[expoPush] receipt check failed', error);
-  }
-}
-
-export async function shouldSendPush(userId: string): Promise<boolean> {
-  try {
-    const user = await UserModel.findById(userId).select('expoPushTokens settings').lean();
-    if (!user) return false;
-    if (user.settings?.notificationsEnabled === false) return false;
-    const tokens = filterValidExpoTokens(Array.isArray(user.expoPushTokens) ? user.expoPushTokens : []);
-    return tokens.length > 0;
-  } catch {
-    return false;
   }
 }
 
@@ -126,7 +136,7 @@ export async function getExpoPushTokensForUser(
   options: { category?: 'message' | 'call' | 'general'; platform?: 'android' | 'ios' } = {}
 ): Promise<string[]> {
   try {
-    const user = await UserModel.findById(userId).select('expoPushTokens settings').lean();
+    const user = await UserModel.findById(userId).select('settings').lean();
     const categoryEnabled = options.category === 'call'
       ? user?.settings?.callNotificationsEnabled !== false
       : options.category === 'general'
@@ -142,13 +152,12 @@ export async function getExpoPushTokensForUser(
     };
     if (options.category === 'call') deviceQuery.callEnabled = true;
     if (options.category !== 'call' && options.category !== 'general') deviceQuery.messageEnabled = true;
+    // DevicePushToken is the sole source of truth — never fall back to User.expoPushTokens.
     if (options.platform) deviceQuery.platform = options.platform;
     const devices = await DevicePushTokenModel.find(deviceQuery)
       .select('expoToken')
       .lean();
-    const deviceTokens = filterValidExpoTokens(devices.map((device) => device.expoToken));
-    if (deviceTokens.length > 0 || options.platform) return deviceTokens;
-    return filterValidExpoTokens(Array.isArray(user.expoPushTokens) ? user.expoPushTokens : []);
+    return filterValidExpoTokens(devices.map((device) => device.expoToken));
   } catch {
     return [];
   }
@@ -182,15 +191,15 @@ function ensureFirebaseAdmin(): boolean {
 
 export async function sendAndroidIncomingCallPush(
   userId: string,
-  payload: { callId: string; callerId: string; callerName: string; isVideo: boolean }
-): Promise<number> {
+  payload: { callId: string; callerId: string; callerName: string; isVideo: boolean; eventId?: string }
+): Promise<AndroidPushOutcome> {
   if (!ensureFirebaseAdmin()) {
     console.warn('[fcm.call] Firebase Admin is not configured');
-    return 0;
+    return pushSkip('no_firebase');
   }
   const user = await UserModel.findById(userId).select('settings').lean();
   if (!user || user.settings?.notificationsEnabled === false || user.settings?.callNotificationsEnabled === false) {
-    return 0;
+    return pushSkip('opted_out');
   }
   const devices = await DevicePushTokenModel.find({
     userId,
@@ -202,22 +211,14 @@ export async function sendAndroidIncomingCallPush(
     .select('fcmToken')
     .lean();
   const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) return pushSkip('no_tokens');
 
+  // Data-only so setBackgroundMessageHandler runs in background/terminated and can
+  // present a single CallStyle / full-screen notification.
   const response = await getMessaging().sendEachForMulticast({
     tokens,
-    data: {
-      type: 'incoming_call',
-      callId: payload.callId,
-      callerId: payload.callerId,
-      callerName: payload.callerName,
-      isVideo: payload.isVideo ? '1' : '0'
-    },
-    android: {
-      priority: 'high',
-      ttl: 60_000,
-      directBootOk: true
-    }
+    data: buildAndroidIncomingCallData(payload),
+    android: buildAndroidIncomingCallMulticastOptions()
   });
 
   const invalidTokens: string[] = [];
@@ -236,20 +237,130 @@ export async function sendAndroidIncomingCallPush(
     successCount: response.successCount,
     failureCount: response.failureCount
   });
-  return response.successCount;
+  return pushOk(response.successCount);
+}
+
+export async function sendAndroidCallCancelPush(
+  userId: string,
+  payload: { callId: string; eventId?: string }
+): Promise<AndroidPushOutcome> {
+  if (!ensureFirebaseAdmin()) return pushSkip('no_firebase');
+  const devices = await DevicePushTokenModel.find({
+    userId,
+    platform: 'android',
+    enabled: true,
+    fcmToken: { $ne: '' }
+  })
+    .select('fcmToken')
+    .lean();
+  const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
+  if (tokens.length === 0) return pushSkip('no_tokens');
+  const response = await getMessaging().sendEachForMulticast({
+    tokens,
+    data: buildAndroidCallCancelData(payload),
+    android: {
+      priority: 'high',
+      ttl: 30_000
+    }
+  });
+  return pushOk(response.successCount);
+}
+
+export async function sendAndroidFriendRequestPush(
+  userId: string,
+  payload: { fromName: string; fromUserId: string; connectionId: string; eventId?: string }
+): Promise<AndroidPushOutcome> {
+  if (!ensureFirebaseAdmin()) return pushSkip('no_firebase');
+  const user = await UserModel.findById(userId).select('settings').lean();
+  if (!user || user.settings?.notificationsEnabled === false) return pushSkip('opted_out');
+  const devices = await DevicePushTokenModel.find({
+    userId,
+    platform: 'android',
+    enabled: true,
+    fcmToken: { $ne: '' }
+  })
+    .select('fcmToken')
+    .lean();
+  const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
+  if (tokens.length === 0) return pushSkip('no_tokens');
+  const response = await getMessaging().sendEachForMulticast({
+    tokens,
+    notification: {
+      title: 'Friend request',
+      body: `${payload.fromName} sent you a friend request`
+    },
+    data: {
+      type: 'friend_request',
+      fromUserId: payload.fromUserId,
+      connectionId: payload.connectionId,
+      ...(payload.eventId ? { eventId: payload.eventId } : {}),
+    },
+    android: {
+      priority: 'high',
+      ttl: 24 * 60 * 60 * 1000,
+      notification: {
+        channelId: 'default_v2',
+        sound: 'default',
+        tag: `friend_request:${payload.connectionId}`
+      }
+    }
+  });
+  return pushOk(response.successCount);
+}
+
+export async function sendAndroidFriendAcceptedPush(
+  userId: string,
+  payload: { accepterName: string; accepterUserId: string; chatId?: string; eventId?: string }
+): Promise<AndroidPushOutcome> {
+  if (!ensureFirebaseAdmin()) return pushSkip('no_firebase');
+  const user = await UserModel.findById(userId).select('settings').lean();
+  if (!user || user.settings?.notificationsEnabled === false) return pushSkip('opted_out');
+  const devices = await DevicePushTokenModel.find({
+    userId,
+    platform: 'android',
+    enabled: true,
+    fcmToken: { $ne: '' }
+  })
+    .select('fcmToken')
+    .lean();
+  const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
+  if (tokens.length === 0) return pushSkip('no_tokens');
+  const response = await getMessaging().sendEachForMulticast({
+    tokens,
+    notification: {
+      title: 'Friend request accepted',
+      body: `${payload.accepterName} accepted your friend request`
+    },
+    data: {
+      type: 'friend_request_accepted',
+      fromUserId: payload.accepterUserId,
+      ...(payload.chatId ? { chatId: payload.chatId } : {}),
+      ...(payload.eventId ? { eventId: payload.eventId } : {}),
+    },
+    android: {
+      priority: 'high',
+      ttl: 24 * 60 * 60 * 1000,
+      notification: {
+        channelId: 'default_v2',
+        sound: 'default',
+        tag: `friend_accepted:${payload.accepterUserId}`
+      }
+    }
+  });
+  return pushOk(response.successCount);
 }
 
 export async function sendAndroidChatMessagePush(
   userId: string,
-  payload: { senderName: string; preview: string; chatId: string; messageId: string }
-): Promise<number> {
+  payload: { senderName: string; preview: string; chatId: string; messageId: string; eventId?: string }
+): Promise<AndroidPushOutcome> {
   if (!ensureFirebaseAdmin()) {
     console.warn('[fcm.message] Firebase Admin is not configured');
-    return 0;
+    return pushSkip('no_firebase');
   }
   const user = await UserModel.findById(userId).select('settings').lean();
   if (!user || user.settings?.notificationsEnabled === false || user.settings?.messageNotificationsEnabled === false) {
-    return 0;
+    return pushSkip('opted_out');
   }
   const devices = await DevicePushTokenModel.find({
     userId,
@@ -261,7 +372,7 @@ export async function sendAndroidChatMessagePush(
     .select('fcmToken')
     .lean();
   const tokens = [...new Set(devices.map((device) => device.fcmToken).filter(Boolean))];
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) return pushSkip('no_tokens');
 
   const preview = payload.preview.trim().slice(0, 120) || 'New message';
   const response = await getMessaging().sendEachForMulticast({
@@ -273,13 +384,15 @@ export async function sendAndroidChatMessagePush(
     data: {
       type: 'chat',
       chatId: payload.chatId,
-      messageId: payload.messageId
+      messageId: payload.messageId,
+      ...(payload.eventId ? { eventId: payload.eventId } : {}),
     },
     android: {
       priority: 'high',
       ttl: 24 * 60 * 60 * 1000,
+      collapseKey: `chat:${payload.chatId}`,
       notification: {
-        channelId: 'messages',
+        channelId: 'messages_v2',
         sound: 'default',
         priority: 'high',
         visibility: 'private',
@@ -305,7 +418,7 @@ export async function sendAndroidChatMessagePush(
     successCount: response.successCount,
     failureCount: response.failureCount
   });
-  return response.successCount;
+  return pushOk(response.successCount);
 }
 
 export async function sendIncomingCallPush(
@@ -315,6 +428,7 @@ export async function sendIncomingCallPush(
     callerId: string;
     callerName: string;
     isVideo: boolean;
+    eventId?: string;
   }
 ): Promise<void> {
   const unique = filterValidExpoTokens(tokens);
@@ -327,15 +441,17 @@ export async function sendIncomingCallPush(
       body: `${payload.callerName} is calling you`,
       sound: 'default',
       priority: 'high',
-      channelId: 'calls',
+      channelId: 'calls_v2',
       categoryId: 'incoming_call',
       ttl: 90,
+      collapseId: `call:${payload.callId}`,
       data: {
         type: 'incoming_call',
         callId: payload.callId,
         callerId: payload.callerId,
         callerName: payload.callerName,
         isVideo: payload.isVideo ? '1' : '0',
+        ...(payload.eventId ? { eventId: payload.eventId } : {}),
       },
     }))
   );
@@ -348,6 +464,7 @@ export async function sendChatMessagePush(
     preview: string;
     chatId: string;
     messageId: string;
+    eventId?: string;
   }
 ): Promise<void> {
   const unique = filterValidExpoTokens(tokens);
@@ -362,11 +479,12 @@ export async function sendChatMessagePush(
       body: preview,
       sound: 'default',
       priority: 'high',
-      channelId: 'messages',
+      channelId: 'messages_v2',
       data: {
         type: 'chat',
         chatId: payload.chatId,
         messageId: payload.messageId,
+        ...(payload.eventId ? { eventId: payload.eventId } : {}),
       },
     }))
   );
@@ -378,6 +496,7 @@ export async function sendFriendRequestPush(
     fromName: string;
     fromUserId: string;
     connectionId: string;
+    eventId?: string;
   }
 ): Promise<void> {
   const unique = filterValidExpoTokens(tokens);
@@ -389,12 +508,43 @@ export async function sendFriendRequestPush(
       title: 'Friend request',
       body: `${payload.fromName} sent you a friend request`,
       sound: 'default',
-      priority: 'default',
-      channelId: 'default',
+      priority: 'high',
+      channelId: 'default_v2',
       data: {
         type: 'friend_request',
         fromUserId: payload.fromUserId,
         connectionId: payload.connectionId,
+        ...(payload.eventId ? { eventId: payload.eventId } : {}),
+      },
+    }))
+  );
+}
+
+export async function sendFriendRequestAcceptedPush(
+  tokens: string[],
+  payload: {
+    accepterName: string;
+    accepterUserId: string;
+    chatId?: string;
+    eventId?: string;
+  }
+): Promise<void> {
+  const unique = filterValidExpoTokens(tokens);
+  if (unique.length === 0) return;
+
+  await sendExpoPush(
+    unique.map((to) => ({
+      to,
+      title: 'Friend request accepted',
+      body: `${payload.accepterName} accepted your friend request`,
+      sound: 'default',
+      priority: 'high',
+      channelId: 'default_v2',
+      data: {
+        type: 'friend_request_accepted',
+        fromUserId: payload.accepterUserId,
+        ...(payload.chatId ? { chatId: payload.chatId } : {}),
+        ...(payload.eventId ? { eventId: payload.eventId } : {}),
       },
     }))
   );

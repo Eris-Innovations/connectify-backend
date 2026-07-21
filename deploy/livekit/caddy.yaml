@@ -1,0 +1,44 @@
+# Caddy L4 config for LiveKit (TLS termination + TURN TLS).
+# Image: livekit/caddyl4
+logging:
+  logs:
+    default:
+      level: INFO
+
+storage:
+  module: file_system
+  root: /data
+
+apps:
+  tls:
+    certificates:
+      automate:
+        - livekit.myconnectify.co
+  layer4:
+    servers:
+      main:
+        listen: [":443"]
+        routes:
+          - match:
+              - tls:
+                  sni:
+                    - "livekit.myconnectify.co"
+            handle:
+              - handler: tls
+                connection_policies:
+                  - alpn: ["http/1.1"]
+              - handler: proxy
+                upstreams:
+                  - dial: ["localhost:7880"]
+      turn:
+        listen: [":5349"]
+        routes:
+          - match:
+              - tls:
+                  sni:
+                    - "livekit.myconnectify.co"
+            handle:
+              - handler: tls
+              - handler: proxy
+                upstreams:
+                  - dial: ["localhost:3478"]

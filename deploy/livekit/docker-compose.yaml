@@ -1,0 +1,25 @@
+# LiveKit SFU + dedicated Redis for Connectify calls.
+# TLS is terminated by the host nginx (already bound to 80/443).
+# LiveKit uses host networking so ICE/TURN advertise the public IP.
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    network_mode: host
+    # Port 6380 avoids colliding with host Redis used by Connectify backend on 6379.
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --bind 127.0.0.1
+      --port 6380

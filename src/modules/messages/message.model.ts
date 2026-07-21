@@ -30,13 +30,19 @@ const messageSchema = new Schema(
       default: 'message',
       index: true
     },
+    /** Client-generated idempotency key for reconnect/retry-safe sends. */
+    clientId: { type: String, trim: true, maxlength: 120 },
     deliveredAt: { type: Date },
     readAt: { type: Date },
     readBy: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     isSecret: { type: Boolean, default: false, index: true },
     isEncrypted: { type: Boolean, default: false },
     replyTo: { type: replySnapshotSchema },
-    expiresAt: { type: Date }
+    expiresAt: { type: Date },
+    deletedForUserIds: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+    deletedForEveryoneAt: { type: Date },
+    deletedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    deletedReplacementText: { type: String, default: '' }
   },
   {
     timestamps: { createdAt: true, updatedAt: true }
@@ -47,6 +53,11 @@ const messageSchema = new Schema(
 messageSchema.index({ conversationId: 1, createdAt: -1 });
 // Sender history queries
 messageSchema.index({ senderId: 1, createdAt: -1 });
+// Idempotent client sends (sparse so system messages without clientId are allowed)
+messageSchema.index(
+  { senderId: 1, clientId: 1 },
+  { unique: true, partialFilterExpression: { clientId: { $type: 'string', $gt: '' } } }
+);
 // TTL for secret / ephemeral messages
 messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
