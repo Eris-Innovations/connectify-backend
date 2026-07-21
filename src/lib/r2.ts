@@ -22,8 +22,11 @@ export function getR2Client(): S3Client | null {
         credentials: {
           accessKeyId: env.R2_ACCESS_KEY_ID,
           secretAccessKey: env.R2_SECRET_ACCESS_KEY
-        }
-      });
+        },
+        // Newer AWS SDK defaults break R2 signed GETs unless checksums are opt-in.
+        requestChecksumCalculation: 'WHEN_REQUIRED',
+        responseChecksumValidation: 'WHEN_REQUIRED'
+      } as ConstructorParameters<typeof S3Client>[0]);
     }
   }
   return r2ClientSingleton;

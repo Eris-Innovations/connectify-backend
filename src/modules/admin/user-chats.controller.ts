@@ -4,6 +4,7 @@ import { UserModel } from '../users/user.model';
 import { ConversationModel } from '../messages/conversation.model';
 import { MessageModel } from '../messages/message.model';
 import { resolveVirtualConversationId } from '../../lib/conversationIds';
+import { resolveStoredMediaUrl } from '../../lib/r2';
 import type { AuthedRequest } from '../../middleware/auth';
 import { canAdminAccessConversation, canAdminAccessUser, requireAdminCapability } from './access';
 
@@ -156,24 +157,24 @@ export async function adminChatMessagesGet(req: Request, res: Response): Promise
       isSecret: Boolean((conv as any).isSecret),
       allMessagesLoaded: wantsAll,
       messageCount: messages.length,
-      messages: messages.map((m: any) => ({
-        ...(senderById.get(String(m.senderId))
-          ? {
-              senderName: senderById.get(String(m.senderId))?.name ?? null,
-              senderUsername: senderById.get(String(m.senderId))?.username ?? null
-            }
-          : {
-              senderName: null,
-              senderUsername: null
-            }),
-        id: String(m._id),
-        chatId: listChatId,
-        senderId: String(m.senderId),
-        text: stripEnc(m.content?.text ?? ''),
-        media: m.content?.mediaUrl ? { type: m.content.mediaType, uri: m.content.mediaUrl } : undefined,
-        timestamp: m.createdAt,
-        isEncrypted: Boolean(m.isEncrypted)
-      }))
+      messages: await Promise.all(
+        messages.map(async (m: any) => {
+          const sender = senderById.get(String(m.senderId));
+          const rawMedia = typeof m.content?.mediaUrl === 'string' ? m.content.mediaUrl.trim() : '';
+          const mediaUri = rawMedia ? await resolveStoredMediaUrl(rawMedia) : '';
+          return {
+            senderName: sender?.name ?? null,
+            senderUsername: sender?.username ?? null,
+            id: String(m._id),
+            chatId: listChatId,
+            senderId: String(m.senderId),
+            text: stripEnc(m.content?.text ?? ''),
+            media: mediaUri ? { type: m.content.mediaType, uri: mediaUri } : undefined,
+            timestamp: m.createdAt,
+            isEncrypted: Boolean(m.isEncrypted)
+          };
+        })
+      )
     }
   });
 }

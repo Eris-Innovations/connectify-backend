@@ -10,6 +10,7 @@ import { AuditLogModel } from '../compliance/audit-log.model';
 import { ReportedContentModel } from './reported-content.model';
 import { RefreshTokenModel } from '../auth/refresh-token.model';
 import { adminUserGalleryGet } from './user-gallery.controller';
+import { adminMediaList } from './admin-media.controller';
 import { adminUserChatsList, adminChatMessagesGet } from './user-chats.controller';
 import { TranscriptModel } from '../ai/transcript.model';
 import { clampSearchQuery, escapeMongoRegex } from '../../lib/mongoRegex';
@@ -537,6 +538,8 @@ adminRouter.patch('/admin/users/:id/role', requireAuth, async (req: AuthedReques
 });
 
 adminRouter.get('/admin/users/:userId/gallery', requireAuth, adminUserGalleryGet);
+
+adminRouter.get('/admin/media', requireAuth, adminMediaList);
 
 adminRouter.get('/admin/users/:userId/chats', requireAuth, adminUserChatsList);
 
