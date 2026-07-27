@@ -1,12 +1,11 @@
 # Dependencies
 node_modules/
+.tmp-install/
 
 # Build
 dist/
 
 # Environment (keep .env.example tracked)
-.env
-.env.*
 !.env.example
 
 # Logs & OS
@@ -18,3 +17,4 @@ yarn-error.log*
 
 # TypeScript
 *.tsbuildinfo
+config.bat
