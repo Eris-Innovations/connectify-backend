@@ -10,7 +10,8 @@ export type PendingCallRecord = {
   callerId: string;
   callerName: string;
   isVideo: boolean;
-  offer: unknown;
+  /** @deprecated LiveKit media path — kept optional for older clients. */
+  offer?: unknown;
   createdAt: string;
 };
 
@@ -64,7 +65,7 @@ export async function storePendingCall(
     callerId: input.callerId,
     callerName: input.callerName,
     isVideo: input.isVideo,
-    offer: input.offer,
+    ...(input.offer !== undefined ? { offer: input.offer } : {}),
     createdAt: new Date().toISOString(),
   };
   try {
@@ -97,6 +98,29 @@ export async function getPendingCall(receiverId: string): Promise<PendingCallRec
   }
   pruneMemory();
   return memoryPendingByReceiver.get(receiverId)?.record ?? null;
+}
+
+/** Lookup pending call owned by this caller (via caller→receiver index). */
+export async function getPendingCallByCaller(
+  callerId: string
+): Promise<{ record: PendingCallRecord; receiverId: string } | null> {
+  try {
+    const receiverId = await redis.get(callerKeyFor(callerId));
+    if (receiverId) {
+      const record = await getPendingCall(receiverId);
+      if (record?.callerId === callerId) {
+        return { record, receiverId };
+      }
+    }
+  } catch {
+    /* fall through to memory */
+  }
+  pruneMemory();
+  const link = memoryReceiverByCaller.get(callerId);
+  if (!link) return null;
+  const entry = memoryPendingByReceiver.get(link.receiverId);
+  if (!entry || entry.record.callerId !== callerId) return null;
+  return { record: entry.record, receiverId: link.receiverId };
 }
 
 export async function clearPendingCall(receiverId: string): Promise<PendingCallRecord | null> {

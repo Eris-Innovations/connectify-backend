@@ -560,7 +560,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
       });
     });
 
-    socket.on('call:initiate', async (payload: { to: string; callerName?: string; offer: unknown }) => {
+    socket.on(
+      'call:initiate',
+      async (payload: { to: string; callerName?: string; isVideo?: boolean; offer?: unknown }) => {
       try {
         const callerId = socket.data.userId as string;
         const receiverId = typeof payload.to === 'string' ? payload.to.trim() : '';
@@ -577,15 +579,14 @@ export function createSocketServer(httpServer: HttpServer): Server {
           return;
         }
 
-        const offerSdp =
-          payload.offer && typeof payload.offer === 'object' && typeof (payload.offer as { sdp?: unknown }).sdp === 'string'
-            ? (payload.offer as { sdp: string }).sdp
-            : '';
-        if (!offerSdp.trim()) {
-          socket.emit('call:failed', { reason: 'invalid_offer' });
-          return;
+        let isVideo = Boolean(payload.isVideo);
+        if (payload.offer && typeof payload.offer === 'object') {
+          const offerSdp =
+            typeof (payload.offer as { sdp?: unknown }).sdp === 'string'
+              ? (payload.offer as { sdp: string }).sdp
+              : '';
+          if (offerSdp.includes('m=video')) isVideo = true;
         }
-        const isVideo = offerSdp.includes('m=video');
 
         const existing = await getPendingCall(receiverId);
         if (existing) {
@@ -609,7 +610,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
           callerId,
           callerName: payload.callerName ?? 'Unknown',
           isVideo,
-          offer: payload.offer,
+          ...(payload.offer !== undefined ? { offer: payload.offer } : {}),
         });
 
         const socketsInRoom = io.sockets.adapter.rooms.get(`user:${receiverId}`)?.size ?? 0;
@@ -629,17 +630,20 @@ export function createSocketServer(httpServer: HttpServer): Server {
           callId: pending.callId,
           room: `user:${receiverId}`,
           socketsInRoom,
+          media: 'livekit',
+          isVideo,
         });
 
         io.to(`user:${receiverId}`).emit('call:invitation', {
           callId: pending.callId,
           fromId: callerId,
           fromName: payload.callerName ?? 'Unknown',
-          offer: payload.offer,
           isVideo,
+          media: 'livekit',
+          ...(payload.offer !== undefined ? { offer: payload.offer } : {}),
         });
 
-        socket.emit('call:ringing', { callId: pending.callId, receiverId });
+        socket.emit('call:ringing', { callId: pending.callId, receiverId, media: 'livekit' });
 
         if (!shouldDeliverPushToUser(receiverId)) {
           console.log('[call:initiate] skip push — callee active in app', { receiverId, socketsInRoom });
@@ -682,7 +686,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
       }
     });
 
-    socket.on('call:accept', async (payload: { to: string; answer: unknown; callId?: string }) => {
+    socket.on('call:accept', async (payload: { to: string; callId?: string; answer?: unknown }) => {
       try {
         const accepterId = socket.data.userId as string;
         const callerId = typeof payload.to === 'string' ? payload.to.trim() : '';
@@ -705,8 +709,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
         await setActiveCall(accepterId, pending.callId, callerId);
         await setActiveCall(callerId, pending.callId, accepterId);
         io.to(`user:${callerId}`).emit('call:accepted', {
-          answer: payload.answer,
           callId: pending.callId,
+          media: 'livekit',
+          ...(payload.answer !== undefined ? { answer: payload.answer } : {}),
         });
       } catch (error) {
         console.error('[call:accept] failed', error);
@@ -714,13 +719,8 @@ export function createSocketServer(httpServer: HttpServer): Server {
       }
     });
 
-    socket.on('ice-candidate', (payload: { to: string; candidate: unknown }) => {
-      const targetId = typeof payload.to === 'string' ? payload.to.trim() : '';
-      if (!targetId || !payload.candidate) return;
-      io.to(`user:${targetId}`).emit('ice-candidate', {
-        candidate: payload.candidate,
-      });
-    });
+    socket.on('ice-candidate', () => {});
+    socket.on('call:renegotiate', () => {});
 
     socket.on('call:end', async (payload: { to: string; reason?: string; callId?: string }) => {
       const me = socket.data.userId as string;
