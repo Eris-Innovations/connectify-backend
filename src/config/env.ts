@@ -78,7 +78,11 @@ const envSchema = z.object({
   /** Deployment-friendly alternative to FIREBASE_SERVICE_ACCOUNT_JSON. */
   FIREBASE_PROJECT_ID: optionalTrimmed('FIREBASE_PROJECT_ID'),
   FIREBASE_CLIENT_EMAIL: optionalTrimmed('FIREBASE_CLIENT_EMAIL'),
-  FIREBASE_PRIVATE_KEY: optionalTrimmedLoose()
+  FIREBASE_PRIVATE_KEY: optionalTrimmedLoose(),
+  /** Self-hosted LiveKit SFU (wss://…). Required for production voice/video media. */
+  LIVEKIT_URL: optionalTrimmed('LIVEKIT_URL'),
+  LIVEKIT_API_KEY: optionalTrimmed('LIVEKIT_API_KEY'),
+  LIVEKIT_API_SECRET: optionalTrimmed('LIVEKIT_API_SECRET')
 });
 
 const parsed = envSchema.safeParse(process.env);
