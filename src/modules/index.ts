@@ -31,6 +31,7 @@ import { friendsRouter } from './friends/friends.routes';
 import { areFriends } from './friends/friends.service';
 import { callsRouter } from './calls/calls.routes';
 import { telemetryRouter } from './telemetry/telemetry.routes';
+import { connectyRouter } from './connecty/connecty.routes';
 import { emitToUser } from '../sockets/io';
 import { scheduleCallTranscription } from './ai/whisper.service';
 import { hasActiveConsent } from './compliance/consent.service';
@@ -54,6 +55,7 @@ apiRouter.use(aiAgentRouter);
 apiRouter.use('/friends', friendsRouter);
 apiRouter.use('/calls', callsRouter);
 apiRouter.use(telemetryRouter);
+apiRouter.use(connectyRouter);
 
 function roleRank(role: 'member' | 'admin' | 'owner'): number {
   if (role === 'owner') return 3;

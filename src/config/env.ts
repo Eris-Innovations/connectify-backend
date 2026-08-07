@@ -85,7 +85,23 @@ const envSchema = z.object({
   /** Self-hosted LiveKit SFU (wss://…). Required for production voice/video media. */
   LIVEKIT_URL: optionalTrimmed('LIVEKIT_URL'),
   LIVEKIT_API_KEY: optionalTrimmed('LIVEKIT_API_KEY'),
-  LIVEKIT_API_SECRET: optionalTrimmed('LIVEKIT_API_SECRET')
+  LIVEKIT_API_SECRET: optionalTrimmed('LIVEKIT_API_SECRET'),
+  /** Connecty personal friend chatbot (free LLM stack). */
+  CONNECTY_ENABLED: z
+    .union([z.string(), z.boolean(), z.undefined()])
+    .transform((v) => {
+      if (v === true || v === 'true' || v === '1') return true;
+      if (v === false || v === 'false' || v === '0') return false;
+      return true;
+    }),
+  CONNECTY_LLM_PROVIDER: z.enum(['auto', 'groq', 'gemini', 'ollama']).default('auto'),
+  GROQ_API_KEY: optionalTrimmed('GROQ_API_KEY'),
+  GROQ_MODEL: z.string().default('llama-3.3-70b-versatile'),
+  GEMINI_API_KEY: optionalTrimmed('GEMINI_API_KEY'),
+  GEMINI_MODEL: z.string().default('gemini-flash-latest'),
+  GEMINI_EMBEDDING_MODEL: z.string().default('text-embedding-004'),
+  OLLAMA_BASE_URL: optionalTrimmed('OLLAMA_BASE_URL'),
+  OLLAMA_MODEL: z.string().default('llama3.1:8b')
 });
 
 const parsed = envSchema.safeParse(process.env);
