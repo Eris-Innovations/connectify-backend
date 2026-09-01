@@ -52,9 +52,11 @@ const envSchema = z.object({
   CLAUDE_API_KEY: z.string().optional(),
   CLAUDE_API_URL: z.string().default('https://api.anthropic.com/v1/messages'),
   CLAUDE_MODEL: z.string().default('claude-3-5-sonnet-20241022'),
-  /** OpenAI API key for Whisper speech-to-text (voice message / audio transcripts). */
+  /** OpenAI API key for Whisper STT and Connecty chat completions. */
   OPENAI_API_KEY: optionalTrimmed('OPENAI_API_KEY'),
   OPENAI_WHISPER_MODEL: z.string().default('whisper-1'),
+  /** Chat model for Connecty when CONNECTY_LLM_PROVIDER is openai (or auto). */
+  OPENAI_CHAT_MODEL: z.string().default('gpt-4o-mini'),
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   STRIPE_CONNECT_CLIENT_ID: z.string().optional(),
@@ -94,7 +96,7 @@ const envSchema = z.object({
       if (v === false || v === 'false' || v === '0') return false;
       return true;
     }),
-  CONNECTY_LLM_PROVIDER: z.enum(['auto', 'groq', 'gemini', 'ollama']).default('auto'),
+  CONNECTY_LLM_PROVIDER: z.enum(['auto', 'openai', 'groq', 'gemini', 'ollama']).default('auto'),
   GROQ_API_KEY: optionalTrimmed('GROQ_API_KEY'),
   GROQ_MODEL: z.string().default('llama-3.3-70b-versatile'),
   GEMINI_API_KEY: optionalTrimmed('GEMINI_API_KEY'),

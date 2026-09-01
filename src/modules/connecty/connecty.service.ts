@@ -273,7 +273,7 @@ export async function sendConnectyMessage(
 
   if (!hasAnyConnectyLlm()) {
     const fallback =
-      "hey — my brain's not plugged in yet on the server (add a free Groq or Gemini key). still your friend though: tell me more?";
+      "hey — my brain's not plugged in yet on the server (add an OpenAI key). still your friend though: tell me more?";
     const assistantMsg = await ConnectyMessageModel.create({
       userId: uid,
       threadId: thread._id,
@@ -419,7 +419,7 @@ export async function sendConnectyMessageStream(
 
   if (!hasAnyConnectyLlm()) {
     const fallback =
-      "hey — my brain's not plugged in yet on the server (add a free Groq or Gemini key). still your friend though: tell me more?";
+      "hey — my brain's not plugged in yet on the server (add an OpenAI key). still your friend though: tell me more?";
     handlers.onToken(fallback);
     const assistantMsg = await ConnectyMessageModel.create({
       userId: uid,

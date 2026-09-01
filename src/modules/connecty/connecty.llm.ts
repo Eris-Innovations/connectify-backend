@@ -2,7 +2,7 @@ import axios from 'axios';
 import { env } from '../../config/env';
 
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
-export type LlmProvider = 'groq' | 'gemini' | 'ollama' | 'none';
+export type LlmProvider = 'openai' | 'groq' | 'gemini' | 'ollama' | 'none';
 
 export type LlmChatResult = {
   text: string;
@@ -52,12 +52,12 @@ function formatAxiosError(err: unknown): string {
 }
 
 function shouldTripCircuit(detail: string): boolean {
-  return /HTTP_401|HTTP_403|GROQ_HTTP_401|GROQ_HTTP_403|GEMINI_HTTP_401|GEMINI_HTTP_403|invalid.?api.?key/i.test(
+  return /HTTP_401|HTTP_403|OPENAI_HTTP_401|OPENAI_HTTP_403|GROQ_HTTP_401|GROQ_HTTP_403|GEMINI_HTTP_401|GEMINI_HTTP_403|invalid.?api.?key/i.test(
     detail
   );
 }
 
-/** Groq rejects empty content and non-standard roles. */
+/** OpenAI-compatible APIs reject empty content and non-standard roles. */
 export function sanitizeMessagesForGroq(messages: ChatMessage[]): ChatMessage[] {
   const out: ChatMessage[] = [];
   for (const m of messages) {
@@ -81,26 +81,36 @@ export function sanitizeMessagesForGroq(messages: ChatMessage[]): ChatMessage[] 
   return out;
 }
 
-async function chatGroq(messages: ChatMessage[], maxTokens: number): Promise<string> {
-  if (!env.GROQ_API_KEY?.trim()) throw new Error('GROQ_API_KEY_MISSING');
-  if (isCircuitOpen('groq')) throw new Error('GROQ_CIRCUIT_OPEN');
+type OpenAiCompatibleChatOpts = {
+  provider: 'openai' | 'groq';
+  url: string;
+  apiKey: string;
+  model: string;
+  messages: ChatMessage[];
+  maxTokens: number;
+  stream?: false;
+};
 
-  const safeMessages = sanitizeMessagesForGroq(messages);
-  const model = (env.GROQ_MODEL || 'llama-3.3-70b-versatile').trim();
+async function chatOpenAiCompatible(opts: OpenAiCompatibleChatOpts): Promise<string> {
+  const tag = opts.provider.toUpperCase();
+  if (!opts.apiKey.trim()) throw new Error(`${tag}_API_KEY_MISSING`);
+  if (isCircuitOpen(opts.provider)) throw new Error(`${tag}_CIRCUIT_OPEN`);
+
+  const safeMessages = sanitizeMessagesForGroq(opts.messages);
 
   try {
     const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
+      opts.url,
       {
-        model,
+        model: opts.model,
         messages: safeMessages,
-        max_tokens: maxTokens,
+        max_tokens: opts.maxTokens,
         temperature: 0.75,
         stream: false
       },
       {
         headers: {
-          Authorization: `Bearer ${env.GROQ_API_KEY.trim()}`,
+          Authorization: `Bearer ${opts.apiKey.trim()}`,
           'Content-Type': 'application/json'
         },
         timeout: 60_000,
@@ -113,38 +123,64 @@ async function chatGroq(messages: ChatMessage[], maxTokens: number): Promise<str
         typeof response.data === 'string'
           ? response.data
           : JSON.stringify(response.data ?? {}).slice(0, 500);
-      const msg = `GROQ_HTTP_${response.status}: ${errBody}`;
-      if (shouldTripCircuit(msg)) tripCircuit('groq', msg);
+      const msg = `${tag}_HTTP_${response.status}: ${errBody}`;
+      if (shouldTripCircuit(msg)) tripCircuit(opts.provider, msg);
       throw new Error(msg);
     }
 
     const text = response.data?.choices?.[0]?.message?.content;
     if (typeof text !== 'string' || !text.trim()) {
-      throw new Error(`GROQ_EMPTY_RESPONSE: ${JSON.stringify(response.data).slice(0, 300)}`);
+      throw new Error(`${tag}_EMPTY_RESPONSE: ${JSON.stringify(response.data).slice(0, 300)}`);
     }
     return text.trim();
   } catch (err) {
-    if (err instanceof Error && err.message.startsWith('GROQ_')) throw err;
-    throw new Error(`GROQ_FAILED: ${formatAxiosError(err)}`);
+    if (err instanceof Error && err.message.startsWith(`${tag}_`)) throw err;
+    throw new Error(`${tag}_FAILED: ${formatAxiosError(err)}`);
   }
 }
 
+async function chatOpenAi(messages: ChatMessage[], maxTokens: number): Promise<string> {
+  return chatOpenAiCompatible({
+    provider: 'openai',
+    url: 'https://api.openai.com/v1/chat/completions',
+    apiKey: env.OPENAI_API_KEY || '',
+    model: (env.OPENAI_CHAT_MODEL || 'gpt-4o-mini').trim(),
+    messages,
+    maxTokens
+  });
+}
+
+async function chatGroq(messages: ChatMessage[], maxTokens: number): Promise<string> {
+  return chatOpenAiCompatible({
+    provider: 'groq',
+    url: 'https://api.groq.com/openai/v1/chat/completions',
+    apiKey: env.GROQ_API_KEY || '',
+    model: (env.GROQ_MODEL || 'llama-3.3-70b-versatile').trim(),
+    messages,
+    maxTokens
+  });
+}
+
 /**
- * Stream Groq tokens; calls onDelta for each piece. Returns full text.
+ * Stream OpenAI-compatible chat tokens; calls onDelta for each piece. Returns full text.
  */
-export async function streamChatGroq(
+async function streamChatOpenAiCompatible(
+  provider: 'openai' | 'groq',
+  url: string,
+  apiKey: string,
+  model: string,
   messages: ChatMessage[],
   maxTokens: number,
   onDelta: (delta: string) => void
 ): Promise<string> {
-  if (!env.GROQ_API_KEY?.trim()) throw new Error('GROQ_API_KEY_MISSING');
-  if (isCircuitOpen('groq')) throw new Error('GROQ_CIRCUIT_OPEN');
+  const tag = provider.toUpperCase();
+  if (!apiKey.trim()) throw new Error(`${tag}_API_KEY_MISSING`);
+  if (isCircuitOpen(provider)) throw new Error(`${tag}_CIRCUIT_OPEN`);
 
   const safeMessages = sanitizeMessagesForGroq(messages);
-  const model = (env.GROQ_MODEL || 'llama-3.3-70b-versatile').trim();
 
   const response = await axios.post(
-    'https://api.groq.com/openai/v1/chat/completions',
+    url,
     {
       model,
       messages: safeMessages,
@@ -154,7 +190,7 @@ export async function streamChatGroq(
     },
     {
       headers: {
-        Authorization: `Bearer ${env.GROQ_API_KEY.trim()}`,
+        Authorization: `Bearer ${apiKey.trim()}`,
         'Content-Type': 'application/json',
         Accept: 'text/event-stream'
       },
@@ -165,7 +201,6 @@ export async function streamChatGroq(
   );
 
   if (response.status < 200 || response.status >= 300) {
-    // axios stream errors may place body differently
     let errBody = '';
     try {
       const chunks: Buffer[] = [];
@@ -176,8 +211,8 @@ export async function streamChatGroq(
     } catch {
       errBody = String(response.statusText || '');
     }
-    const msg = `GROQ_HTTP_${response.status}: ${errBody}`;
-    if (shouldTripCircuit(msg)) tripCircuit('groq', msg);
+    const msg = `${tag}_HTTP_${response.status}: ${errBody}`;
+    if (shouldTripCircuit(msg)) tripCircuit(provider, msg);
     throw new Error(msg);
   }
 
@@ -214,8 +249,43 @@ export async function streamChatGroq(
     stream.on('error', (e) => reject(e));
   });
 
-  if (!full.trim()) throw new Error('GROQ_EMPTY_STREAM');
+  if (!full.trim()) throw new Error(`${tag}_EMPTY_STREAM`);
   return full.trim();
+}
+
+export async function streamChatOpenAi(
+  messages: ChatMessage[],
+  maxTokens: number,
+  onDelta: (delta: string) => void
+): Promise<string> {
+  return streamChatOpenAiCompatible(
+    'openai',
+    'https://api.openai.com/v1/chat/completions',
+    env.OPENAI_API_KEY || '',
+    (env.OPENAI_CHAT_MODEL || 'gpt-4o-mini').trim(),
+    messages,
+    maxTokens,
+    onDelta
+  );
+}
+
+/**
+ * Stream Groq tokens; calls onDelta for each piece. Returns full text.
+ */
+export async function streamChatGroq(
+  messages: ChatMessage[],
+  maxTokens: number,
+  onDelta: (delta: string) => void
+): Promise<string> {
+  return streamChatOpenAiCompatible(
+    'groq',
+    'https://api.groq.com/openai/v1/chat/completions',
+    env.GROQ_API_KEY || '',
+    (env.GROQ_MODEL || 'llama-3.3-70b-versatile').trim(),
+    messages,
+    maxTokens,
+    onDelta
+  );
 }
 
 async function chatOllama(messages: ChatMessage[], maxTokens: number): Promise<string> {
@@ -296,20 +366,23 @@ export async function connectyChat(
   const preferred = env.CONNECTY_LLM_PROVIDER;
   const started = Date.now();
 
-  type Attempt = { provider: 'groq' | 'gemini' | 'ollama'; run: () => Promise<string> };
+  type Attempt = { provider: 'openai' | 'groq' | 'gemini' | 'ollama'; run: () => Promise<string> };
   const all: Attempt[] = [
+    { provider: 'openai', run: () => chatOpenAi(messages, maxTokens) },
     { provider: 'groq', run: () => chatGroq(messages, maxTokens) },
     { provider: 'gemini', run: () => chatGemini(messages, maxTokens) },
     { provider: 'ollama', run: () => chatOllama(messages, maxTokens) }
   ];
 
   let order: Attempt[];
-  if (preferred === 'groq') order = [all[0]!, all[1]!, all[2]!];
-  else if (preferred === 'gemini') order = [all[1]!, all[0]!, all[2]!];
-  else if (preferred === 'ollama') order = [all[2]!, all[0]!, all[1]!];
-  else order = all;
+  if (preferred === 'openai') order = [all[0]!, all[1]!, all[2]!, all[3]!];
+  else if (preferred === 'groq') order = [all[1]!, all[0]!, all[2]!, all[3]!];
+  else if (preferred === 'gemini') order = [all[2]!, all[0]!, all[1]!, all[3]!];
+  else if (preferred === 'ollama') order = [all[3]!, all[0]!, all[1]!, all[2]!];
+  else order = all; // auto: openai → groq → gemini → ollama
 
   order = order.filter((a) => {
+    if (a.provider === 'openai') return Boolean(env.OPENAI_API_KEY?.trim()) && !isCircuitOpen('openai');
     if (a.provider === 'groq') return Boolean(env.GROQ_API_KEY?.trim()) && !isCircuitOpen('groq');
     if (a.provider === 'gemini') return Boolean(env.GEMINI_API_KEY?.trim()) && !isCircuitOpen('gemini');
     if (a.provider === 'ollama') {
@@ -350,7 +423,7 @@ export async function connectyChat(
 }
 
 /**
- * Prefer Groq streaming; on failure fall back to non-stream full reply with synthetic token chunks.
+ * Prefer OpenAI (then Groq) streaming; on failure fall back to non-stream full reply with synthetic token chunks.
  */
 export async function connectyChatStreaming(
   messages: ChatMessage[],
@@ -358,8 +431,35 @@ export async function connectyChatStreaming(
 ): Promise<LlmChatResult> {
   const maxTokens = opts.maxTokens ?? 700;
   const started = Date.now();
+  const preferred = env.CONNECTY_LLM_PROVIDER;
 
-  if (env.GROQ_API_KEY?.trim() && !isCircuitOpen('groq') && env.CONNECTY_LLM_PROVIDER !== 'gemini') {
+  const tryOpenAiStream =
+    Boolean(env.OPENAI_API_KEY?.trim()) &&
+    !isCircuitOpen('openai') &&
+    preferred !== 'groq' &&
+    preferred !== 'gemini' &&
+    preferred !== 'ollama';
+
+  if (tryOpenAiStream) {
+    try {
+      const text = await streamChatOpenAi(messages, maxTokens, opts.onDelta);
+      const latencyMs = Date.now() - started;
+      console.log(`[connecty] LLM stream provider=openai latencyMs=${latencyMs}`);
+      return { text, provider: 'openai', latencyMs };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn('[connecty] stream openai failed, falling back:', detail.slice(0, 400));
+    }
+  }
+
+  const tryGroqStream =
+    Boolean(env.GROQ_API_KEY?.trim()) &&
+    !isCircuitOpen('groq') &&
+    preferred !== 'openai' &&
+    preferred !== 'gemini' &&
+    preferred !== 'ollama';
+
+  if (tryGroqStream || (preferred === 'groq' && Boolean(env.GROQ_API_KEY?.trim()) && !isCircuitOpen('groq'))) {
     try {
       const text = await streamChatGroq(messages, maxTokens, opts.onDelta);
       const latencyMs = Date.now() - started;
@@ -374,7 +474,6 @@ export async function connectyChatStreaming(
   // Fallback: full generate then optional chunk synthetic deltas
   const result = await connectyChat(messages, { maxTokens });
   if (result.text && result.provider !== 'none') {
-    // emit as one delta if client never got tokens (optional progressive chunks)
     const chunkSize = 24;
     for (let i = 0; i < result.text.length; i += chunkSize) {
       opts.onDelta(result.text.slice(i, i + chunkSize));
@@ -385,13 +484,21 @@ export async function connectyChatStreaming(
 
 export async function probeLlmProviders(): Promise<{
   preferred: string;
+  openai: { configured: boolean; ok: boolean; detail?: string; circuitOpen?: boolean };
   groq: { configured: boolean; ok: boolean; detail?: string; circuitOpen?: boolean };
   gemini: { configured: boolean; ok: boolean; detail?: string; circuitOpen?: boolean };
 }> {
+  const openaiConfigured = Boolean(env.OPENAI_API_KEY?.trim());
   const groqConfigured = Boolean(env.GROQ_API_KEY?.trim());
   const geminiConfigured = Boolean(env.GEMINI_API_KEY?.trim());
   const result = {
     preferred: env.CONNECTY_LLM_PROVIDER,
+    openai: {
+      configured: openaiConfigured,
+      ok: false as boolean,
+      detail: undefined as string | undefined,
+      circuitOpen: isCircuitOpen('openai')
+    },
     groq: {
       configured: groqConfigured,
       ok: false as boolean,
@@ -405,6 +512,20 @@ export async function probeLlmProviders(): Promise<{
       circuitOpen: isCircuitOpen('gemini')
     }
   };
+
+  if (openaiConfigured && !result.openai.circuitOpen) {
+    try {
+      const text = await chatOpenAi([{ role: 'user', content: 'Reply with exactly: openai_ok' }], 16);
+      result.openai.ok = text.length > 0;
+      result.openai.detail = `ok len=${text.length} model=${env.OPENAI_CHAT_MODEL}`;
+    } catch (err) {
+      result.openai.detail = err instanceof Error ? err.message.slice(0, 300) : 'failed';
+    }
+  } else if (!openaiConfigured) {
+    result.openai.detail = 'OPENAI_API_KEY not set';
+  } else {
+    result.openai.detail = 'circuit open';
+  }
 
   if (groqConfigured && !result.groq.circuitOpen) {
     try {
@@ -485,7 +606,8 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 
 export function hasAnyConnectyLlm(): boolean {
   return Boolean(
-    env.GROQ_API_KEY?.trim() ||
+    env.OPENAI_API_KEY?.trim() ||
+      env.GROQ_API_KEY?.trim() ||
       env.GEMINI_API_KEY?.trim() ||
       env.OLLAMA_BASE_URL ||
       env.CONNECTY_LLM_PROVIDER === 'ollama'
