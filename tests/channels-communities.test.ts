@@ -63,4 +63,15 @@ describe('communities models + HTTP auth gates', () => {
     expect((await request(app).post(`${env.API_PREFIX}/communities/${id}/join`)).status).toBe(401);
     expect((await request(app).get(`${env.API_PREFIX}/communities/${id}`)).status).toBe(401);
   });
+
+  it('requires auth to invite community members', async () => {
+    const id = new Types.ObjectId().toString();
+    expect(
+      (
+        await request(app)
+          .post(`${env.API_PREFIX}/communities/${id}/members`)
+          .send({ userIds: [new Types.ObjectId().toString()] })
+      ).status
+    ).toBe(401);
+  });
 });

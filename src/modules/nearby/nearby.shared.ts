@@ -3,8 +3,8 @@ export type NearbyRadiusM = (typeof NEARBY_ALLOWED_RADII_M)[number];
 
 const ALLOWED = new Set<number>(NEARBY_ALLOWED_RADII_M);
 
-/** Drops stale presence so users who left Nearby stop appearing. */
-export const NEARBY_STALE_MS = 5 * 60 * 1000;
+/** Drops stale presence so users who left Nearby stop appearing. Background pings are sparse. */
+export const NEARBY_STALE_MS = 30 * 60 * 1000;
 
 export function isAllowedNearbyRadius(radiusM: number): radiusM is NearbyRadiusM {
   return ALLOWED.has(radiusM);

@@ -24,14 +24,14 @@ describe('nearby shared helpers', () => {
     expect(d).toBeLessThan(130);
   });
 
-  it('stale cutoff is 5 minutes behind now', () => {
+  it('stale cutoff is 30 minutes behind now', () => {
     const now = Date.parse('2026-09-20T12:00:00.000Z');
+    expect(NEARBY_STALE_MS).toBe(30 * 60 * 1000);
     expect(nearbyStaleCutoff(now).toISOString()).toBe(
       new Date(now - NEARBY_STALE_MS).toISOString()
     );
   });
 });
-
 describe('nearby HTTP auth gates', () => {
   const app = createApp();
 
