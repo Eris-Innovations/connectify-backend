@@ -61,6 +61,20 @@ const userSchema = new Schema(
       onboardingCompletedAt: { type: Date }
     },
     lastSeenAt: { type: Date },
+    /** Opt-in GPS Nearby discovery (default off). */
+    nearbyEnabled: { type: Boolean, default: false, index: true },
+    nearbyLocation: {
+      type: {
+        type: String,
+        enum: ['Point'],
+        default: 'Point'
+      },
+      coordinates: {
+        type: [Number],
+        default: undefined
+      }
+    },
+    nearbyUpdatedAt: { type: Date },
     followers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     following: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     settings: { type: userSettingsSchema, default: () => ({}) },
@@ -89,4 +103,8 @@ const userSchema = new Schema(
 );
 
 export type UserDocument = InferSchemaType<typeof userSchema> & { _id: string };
+
+userSchema.index({ nearbyLocation: '2dsphere' });
+userSchema.index({ nearbyEnabled: 1, nearbyUpdatedAt: -1 });
+
 export const UserModel = model('User', userSchema);
