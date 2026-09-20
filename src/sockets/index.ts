@@ -297,7 +297,15 @@ export function createSocketServer(httpServer: HttpServer): Server {
         clientId?: string;
         mediaUrl?: string;
         mediaType?: string;
-        mediaMetadata?: { durationSec?: number; name?: string; size?: number };
+        mediaMetadata?: {
+          durationSec?: number;
+          name?: string;
+          size?: number;
+          lat?: number;
+          lng?: number;
+          accuracy?: number;
+          label?: string;
+        };
         replyToMessageId?: string;
       }) => {
         const now = new Date();
@@ -305,18 +313,21 @@ export function createSocketServer(httpServer: HttpServer): Server {
 
         const text = typeof payload.content === 'string' ? payload.content : '';
         const mediaUrl = typeof payload.mediaUrl === 'string' ? payload.mediaUrl.trim() : '';
-        const allowedTypes = new Set(['image', 'video', 'file', 'voice']);
+        const allowedTypes = new Set(['image', 'video', 'file', 'voice', 'location']);
         const rawType = typeof payload.mediaType === 'string' ? payload.mediaType.trim() : '';
-        const mediaType =
-          mediaUrl && allowedTypes.has(rawType) ? rawType : mediaUrl ? 'file' : 'text';
-
-        if (!text.trim() && !mediaUrl) {
-          return;
-        }
 
         const metaRaw =
           payload.mediaMetadata && typeof payload.mediaMetadata === 'object' ? payload.mediaMetadata : null;
-        const metadata: { durationSec?: number; name?: string; size?: number } = {};
+        const metadata: {
+          durationSec?: number;
+          name?: string;
+          size?: number;
+          lat?: number;
+          lng?: number;
+          accuracy?: number;
+          label?: string;
+          live?: boolean;
+        } = {};
         if (metaRaw) {
           if (typeof metaRaw.durationSec === 'number') {
             metadata.durationSec = Math.min(3600, Math.max(0, Math.floor(metaRaw.durationSec)));
@@ -327,7 +338,40 @@ export function createSocketServer(httpServer: HttpServer): Server {
           if (typeof metaRaw.size === 'number') {
             metadata.size = Math.min(50 * 1024 * 1024, Math.max(0, Math.floor(metaRaw.size)));
           }
+          if (typeof metaRaw.lat === 'number' && Number.isFinite(metaRaw.lat)) {
+            metadata.lat = Math.min(90, Math.max(-90, metaRaw.lat));
+          }
+          if (typeof metaRaw.lng === 'number' && Number.isFinite(metaRaw.lng)) {
+            metadata.lng = Math.min(180, Math.max(-180, metaRaw.lng));
+          }
+          if (typeof metaRaw.accuracy === 'number' && Number.isFinite(metaRaw.accuracy)) {
+            metadata.accuracy = Math.min(100000, Math.max(0, metaRaw.accuracy));
+          }
+          if (typeof metaRaw.label === 'string' && metaRaw.label.trim()) {
+            metadata.label = metaRaw.label.trim().slice(0, 120);
+          }
         }
+
+        const isLocation =
+          rawType === 'location' &&
+          typeof metadata.lat === 'number' &&
+          typeof metadata.lng === 'number';
+        if (isLocation) {
+          metadata.live = false;
+        }
+
+        const mediaType = isLocation
+          ? 'location'
+          : mediaUrl && allowedTypes.has(rawType) && rawType !== 'location'
+            ? rawType
+            : mediaUrl
+              ? 'file'
+              : 'text';
+
+        if (!text.trim() && !mediaUrl && !isLocation) {
+          return;
+        }
+
         const metadataForDb = Object.keys(metadata).length ? metadata : undefined;
 
         const rawConv = typeof payload.conversationId === 'string' ? payload.conversationId.trim() : '';
@@ -371,6 +415,11 @@ export function createSocketServer(httpServer: HttpServer): Server {
             ? payload.clientId.trim().slice(0, 120)
             : undefined;
 
+        const resolvedMediaType = isLocation ? 'location' : mediaUrl ? mediaType : 'text';
+        const resolvedText = isLocation
+          ? text.trim() || metadata.label || '📍 Location'
+          : text;
+
         let created;
         if (clientId) {
           try {
@@ -379,9 +428,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
               senderId,
               clientId,
               content: {
-                text,
+                text: resolvedText,
                 mediaUrl: mediaUrl || undefined,
-                mediaType: mediaUrl ? mediaType : 'text',
+                mediaType: resolvedMediaType,
                 metadata: metadataForDb
               },
               type: 'message',
@@ -409,9 +458,9 @@ export function createSocketServer(httpServer: HttpServer): Server {
             conversationId: dbConversationId,
             senderId,
             content: {
-              text,
+              text: resolvedText,
               mediaUrl: mediaUrl || undefined,
-              mediaType: mediaUrl ? mediaType : 'text',
+              mediaType: resolvedMediaType,
               metadata: metadataForDb
             },
             type: 'message',
@@ -429,15 +478,17 @@ export function createSocketServer(httpServer: HttpServer): Server {
           });
         }
 
-        const previewText = mediaUrl
-          ? mediaType === 'voice'
-            ? '🎤 Voice message'
-            : mediaType === 'image'
-              ? '📷 Photo'
-              : mediaType === 'video'
-                ? '🎥 Video'
-                : '📎 File'
-          : text.slice(0, 200);
+        const previewText = isLocation
+          ? '📍 Location'
+          : mediaUrl
+            ? mediaType === 'voice'
+              ? '🎤 Voice message'
+              : mediaType === 'image'
+                ? '📷 Photo'
+                : mediaType === 'video'
+                  ? '🎥 Video'
+                  : '📎 File'
+            : text.slice(0, 200);
 
         await ConversationModel.findByIdAndUpdate(dbConversationId, {
           lastActivityAt: now,
@@ -466,7 +517,7 @@ export function createSocketServer(httpServer: HttpServer): Server {
           conversationId: rawConv,
           messageId: String(created._id),
           senderId,
-          content: text,
+          content: resolvedText,
           media: mediaUrl
             ? {
                 uri: playableMediaUrl,
@@ -474,6 +525,15 @@ export function createSocketServer(httpServer: HttpServer): Server {
                 durationSec: metadata.durationSec,
                 name: metadata.name,
                 size: metadata.size
+              }
+            : undefined,
+          location: isLocation
+            ? {
+                lat: metadata.lat,
+                lng: metadata.lng,
+                accuracy: metadata.accuracy,
+                label: metadata.label,
+                live: false
               }
             : undefined,
           createdAt: created.createdAt.toISOString(),

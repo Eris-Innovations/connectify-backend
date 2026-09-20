@@ -56,7 +56,10 @@ const conversationSchema = new Schema(
     },
     disappearingMessagesUpdatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     disappearingMessagesUpdatedAt: { type: Date },
-    createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true }
+    createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    /** Set when this group is a Community announcements chat or a linked community group. */
+    communityId: { type: Schema.Types.ObjectId, ref: 'Community', index: true },
+    isAnnouncementGroup: { type: Boolean, default: false, index: true }
   },
   {
     timestamps: { createdAt: true, updatedAt: true }

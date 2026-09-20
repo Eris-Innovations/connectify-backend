@@ -15,6 +15,8 @@ export async function assertChannelMember(channelId: string, userId: string) {
   if (!Types.ObjectId.isValid(channelId)) return null;
   const channel = await ChannelModel.findById(channelId).lean();
   if (!channel || !isChannelMember(channel, userId)) return null;
+  // Broadcast channels do not use kanban.
+  if ((channel as { kind?: string }).kind === 'broadcast') return null;
   return channel;
 }
 

@@ -5,7 +5,7 @@ const replySnapshotSchema = new Schema(
     messageId: { type: Schema.Types.ObjectId, ref: 'Message', required: true },
     senderId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     previewText: { type: String, default: '' },
-    mediaType: { type: String, enum: ['text', 'image', 'video', 'file', 'voice'] }
+    mediaType: { type: String, enum: ['text', 'image', 'video', 'file', 'voice', 'location'] }
   },
   { _id: false }
 );
@@ -19,7 +19,7 @@ const messageSchema = new Schema(
       mediaUrl: { type: String },
       mediaType: {
         type: String,
-        enum: ['text', 'image', 'video', 'file', 'voice', 'system'],
+        enum: ['text', 'image', 'video', 'file', 'voice', 'system', 'location'],
         default: 'text'
       },
       metadata: { type: Schema.Types.Mixed }

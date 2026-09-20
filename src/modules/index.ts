@@ -4,6 +4,7 @@ import { healthRouter } from './health/health.routes';
 import { authRouter } from './auth/auth.routes';
 import { usersRouter } from './users/users.routes';
 import { channelsRouter } from './channels/channels.routes';
+import { communitiesRouter } from './communities/communities.routes';
 import { kanbanRouter } from './kanban/kanban.routes';
 import { secretPrekeyRouter } from './crypto/secret-prekey.routes';
 import { UserModel } from './users/user.model';
@@ -32,6 +33,7 @@ import { areFriends } from './friends/friends.service';
 import { callsRouter } from './calls/calls.routes';
 import { telemetryRouter } from './telemetry/telemetry.routes';
 import { connectyRouter } from './connecty/connecty.routes';
+import { liveLocationRouter } from './messages/live-location.routes';
 import { emitToUser } from '../sockets/io';
 import { scheduleCallTranscription } from './ai/whisper.service';
 import { hasActiveConsent } from './compliance/consent.service';
@@ -45,6 +47,7 @@ apiRouter.use('/users', usersRouter);
 apiRouter.use(mediaRouter);
 apiRouter.use(feedRouter);
 apiRouter.use(channelsRouter);
+apiRouter.use(communitiesRouter);
 apiRouter.use(kanbanRouter);
 apiRouter.use(secretPrekeyRouter);
 apiRouter.use(threadsRouter);
@@ -56,6 +59,7 @@ apiRouter.use('/friends', friendsRouter);
 apiRouter.use('/calls', callsRouter);
 apiRouter.use(telemetryRouter);
 apiRouter.use(connectyRouter);
+apiRouter.use(liveLocationRouter);
 
 function roleRank(role: 'member' | 'admin' | 'owner'): number {
   if (role === 'owner') return 3;
@@ -689,6 +693,22 @@ apiRouter.get('/chats/:id/messages', requireAuth, async (req: AuthedRequest, res
                 m.content.mediaType === 'voice' ? transcriptByMessageId.get(String(m._id)) : undefined
             }
           : undefined,
+        location:
+          m.content?.mediaType === 'location' &&
+          !m.deletedForEveryoneAt &&
+          typeof m.content?.metadata?.lat === 'number' &&
+          typeof m.content?.metadata?.lng === 'number'
+            ? {
+                lat: m.content.metadata.lat,
+                lng: m.content.metadata.lng,
+                accuracy: m.content.metadata.accuracy,
+                label: m.content.metadata.label,
+                live: Boolean(m.content.metadata.live),
+                liveSessionId: m.content.metadata.liveSessionId,
+                expiresAt: m.content.metadata.expiresAt,
+                stoppedAt: m.content.metadata.stoppedAt
+              }
+            : undefined,
         timestamp: m.createdAt,
         status: m.readAt ? 'seen' : m.deliveredAt ? 'delivered' : 'sent',
         readBy: Array.isArray(m.readBy) ? m.readBy.map((id: any) => String(id)) : [],
@@ -779,15 +799,19 @@ apiRouter.delete('/messages/:id', requireAuth, async (req: AuthedRequest, res) =
             senderId: latest.senderId,
             previewText: latest.deletedForEveryoneAt
               ? (latest.deletedReplacementText || 'This message was deleted')
-              : latest.content?.mediaUrl
-                ? latest.content.mediaType === 'voice'
-                  ? '🎤 Voice message'
-                  : latest.content.mediaType === 'image'
-                    ? '📷 Photo'
-                    : latest.content.mediaType === 'video'
-                      ? '🎥 Video'
-                      : '📎 File'
-                : latest.content?.text?.slice(0, 200) ?? '',
+              : latest.content?.mediaType === 'location'
+                ? latest.content?.metadata?.live
+                  ? '📍 Live location'
+                  : '📍 Location'
+                : latest.content?.mediaUrl
+                  ? latest.content.mediaType === 'voice'
+                    ? '🎤 Voice message'
+                    : latest.content.mediaType === 'image'
+                      ? '📷 Photo'
+                      : latest.content.mediaType === 'video'
+                        ? '🎥 Video'
+                        : '📎 File'
+                  : latest.content?.text?.slice(0, 200) ?? '',
             createdAt: latest.createdAt
           }
         }).exec();
