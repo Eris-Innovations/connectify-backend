@@ -184,13 +184,13 @@ communitiesRouter.post('/communities/:id/members', requireAuth, async (req: Auth
   }
 
   const raw = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
-  const userIds = [
-    ...new Set(
+  const userIds = Array.from(
+    new Set(
       raw
         .map((id: unknown) => String(id ?? '').trim())
-        .filter((id: string) => Boolean(id))
-    ),
-  ];
+        .filter((id: string) => id.length > 0)
+    )
+  ) as string[];
   if (userIds.length === 0) {
     return res.status(400).json({ success: false, message: 'userIds required' });
   }
