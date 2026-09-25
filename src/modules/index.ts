@@ -35,6 +35,7 @@ import { callsRouter } from './calls/calls.routes';
 import { telemetryRouter } from './telemetry/telemetry.routes';
 import { connectyRouter } from './connecty/connecty.routes';
 import { liveLocationRouter } from './messages/live-location.routes';
+import { referralAdminRouter, referralsRouter } from './referrals/referrals.routes';
 import { emitToUser } from '../sockets/io';
 import { scheduleCallTranscription } from './ai/whisper.service';
 import { hasActiveConsent } from './compliance/consent.service';
@@ -61,6 +62,8 @@ apiRouter.use('/friends', friendsRouter);
 apiRouter.use('/calls', callsRouter);
 apiRouter.use(telemetryRouter);
 apiRouter.use(connectyRouter);
+apiRouter.use('/referrals', referralsRouter);
+apiRouter.use(referralAdminRouter);
 apiRouter.use(liveLocationRouter);
 
 function roleRank(role: 'member' | 'admin' | 'owner'): number {

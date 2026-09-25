@@ -3,6 +3,7 @@ import { requireAuth } from '../../middleware/auth';
 import {
   completeProfileController,
   deleteDevicePushTokenController,
+  deleteMeController,
   getMeController,
   getPublicUserController,
   updateMeController,
@@ -15,6 +16,7 @@ export const usersRouter = Router();
 
 usersRouter.get('/me', requireAuth, asyncHandler(getMeController));
 usersRouter.put('/me', requireAuth, asyncHandler(updateMeController));
+usersRouter.delete('/me', requireAuth, asyncHandler(deleteMeController));
 usersRouter.post('/profile', requireAuth, asyncHandler(completeProfileController));
 usersRouter.post('/push-token', requireAuth, asyncHandler(upsertLegacyExpoPushTokenController));
 usersRouter.post('/devices/push-token', requireAuth, asyncHandler(upsertDevicePushTokenController));

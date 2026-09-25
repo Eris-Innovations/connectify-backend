@@ -11,6 +11,7 @@ import { RefreshTokenModel } from './refresh-token.model';
 import { normalizePhone } from '../../lib/phone';
 import { AuthSecurityEventModel } from './security-event.model';
 import { DevicePushTokenModel } from '../users/device-push-token.model';
+import { verifyReferralOnOtp } from '../referrals/referral.service';
 
 type RegisterInput = {
   name: string;
@@ -18,6 +19,7 @@ type RegisterInput = {
   email: string;
   password: string;
   phone: string;
+  inviteCode?: string;
 };
 
 type LoginInput = {
@@ -172,8 +174,8 @@ export async function registerUser(input: RegisterInput, meta?: AuthRequestMetad
     email: emailLower,
     phone: normalizedPhone,
     passwordHash,
-    // Signup already collects a unique username; skip duplicate “choose username” onboarding.
-    hasCompletedProfile: true
+    hasCompletedProfile: true,
+    ...(input.inviteCode ? { pendingInviteCode: input.inviteCode.trim().toLowerCase() } : {})
   });
 
   const code = sixDigitOtp();
@@ -329,6 +331,12 @@ export async function verifyOtp(userId: string, code: string) {
   const user = await UserModel.findByIdAndUpdate(userId, { isVerified: true }, { new: true });
   if (!user) {
     return { status: StatusCodes.NOT_FOUND, body: { success: false, message: 'User not found' } };
+  }
+
+  try {
+    await verifyReferralOnOtp(String(user._id));
+  } catch (error) {
+    console.error('[referrals] could not apply invite code', error);
   }
 
   const role = (user.role as 'user' | 'admin' | 'super_admin' | 'moderator' | 'analyst') ?? 'user';

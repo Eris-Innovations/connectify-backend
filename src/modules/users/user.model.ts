@@ -75,6 +75,7 @@ const userSchema = new Schema(
       }
     },
     nearbyUpdatedAt: { type: Date },
+    pendingInviteCode: { type: String, default: '' },
     followers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     following: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     settings: { type: userSettingsSchema, default: () => ({}) },

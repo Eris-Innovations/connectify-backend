@@ -13,7 +13,11 @@ export const registerSchema = z.object({
     username: z.string().min(3).max(24).regex(/^[a-zA-Z0-9_.]+$/),
     email: z.string().email(),
     password: z.string().min(8),
-    phone: phoneField
+    phone: phoneField,
+    inviteCode: z.preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z.string().trim().regex(/^[a-f0-9]{6}$/i).optional()
+    )
   })
 });
 

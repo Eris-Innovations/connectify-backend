@@ -5,6 +5,7 @@ import { UserModel } from './user.model';
 import { updateMeSchema } from './users.schemas';
 import { resolveStoredMediaUrl } from '../../lib/r2';
 import { DevicePushTokenModel } from './device-push-token.model';
+import { AccountDeleteError, deleteOwnAccount } from './delete-account.service';
 import { isUserConnected } from '../../sockets/io';
 
 export async function getMeController(req: AuthedRequest, res: Response) {
@@ -237,6 +238,18 @@ export async function upsertLegacyExpoPushTokenController(req: AuthedRequest, re
   );
 
   return res.status(StatusCodes.OK).json({ success: true });
+}
+
+export async function deleteMeController(req: AuthedRequest, res: Response) {
+  try {
+    await deleteOwnAccount(req.auth!.userId);
+  } catch (error) {
+    if (error instanceof AccountDeleteError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
+    throw error;
+  }
+  return res.status(StatusCodes.OK).json({ success: true, message: 'Account deleted' });
 }
 
 export async function deleteDevicePushTokenController(req: AuthedRequest, res: Response) {

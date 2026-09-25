@@ -208,3 +208,46 @@ export async function sendSignupVerificationEmail(
     return { sent: false, reason: 'request_failed', detail };
   }
 }
+
+export async function sendReferralInviteEmail(to: string, code: string): Promise<SendEmailResult> {
+  const apiKey = env.RESEND_API_KEY?.trim();
+  const link = `connectify://invite?code=${encodeURIComponent(code)}`;
+  const text = [
+    'Connectify',
+    '',
+    'You have been invited to download Connectify and create an account.',
+    '',
+    `Invite code: ${code}`,
+    `Open the app: ${link}`,
+    '',
+    'Use this email address when you sign up, and enter the invite code. The code expires in 14 days.'
+  ].join('\n');
+
+  if (!apiKey) {
+    if (env.NODE_ENV !== 'production') {
+      console.info(`[email] referral invite for ${to}: ${code}`);
+    }
+    return { sent: false, reason: 'not_configured' };
+  }
+
+  const { from, missingDetail } = resolveEmailFrom();
+  if (!from) return { sent: false, reason: 'not_configured', detail: missingDetail };
+
+  const resend = new Resend(apiKey);
+  try {
+    const { data, error } = await resend.emails.send({
+      from,
+      to: to.toLowerCase(),
+      subject: 'You are invited to Connectify',
+      text,
+      html: `<p>You have been invited to download Connectify and create an account.</p><p>Invite code: <strong>${code}</strong></p><p><a href="${link}">Open Connectify</a></p><p>Use this email address when you sign up. The code expires in 14 days.</p>`
+    });
+    if (error || !data?.id) {
+      return { sent: false, reason: 'request_failed', detail: error?.message ?? 'No message id' };
+    }
+    return { sent: true };
+  } catch (err: unknown) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { sent: false, reason: 'request_failed', detail };
+  }
+}
