@@ -63,15 +63,14 @@ const userSchema = new Schema(
     lastSeenAt: { type: Date },
     /** Opt-in GPS Nearby discovery (default off). */
     nearbyEnabled: { type: Boolean, default: false, index: true },
+    // Omit until Nearby is enabled — empty `{ type: 'Point' }` fails 2dsphere (Mongo 16755).
     nearbyLocation: {
       type: {
         type: String,
-        enum: ['Point'],
-        default: 'Point'
+        enum: ['Point']
       },
       coordinates: {
-        type: [Number],
-        default: undefined
+        type: [Number]
       }
     },
     nearbyUpdatedAt: { type: Date },
