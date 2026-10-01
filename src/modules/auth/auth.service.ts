@@ -12,6 +12,7 @@ import { normalizePhone } from '../../lib/phone';
 import { AuthSecurityEventModel } from './security-event.model';
 import { DevicePushTokenModel } from '../users/device-push-token.model';
 import { verifyReferralOnOtp } from '../referrals/referral.service';
+import { duplicateErrorFromMongo, isMongoDuplicateError } from '../../shared/errors';
 
 type RegisterInput = {
   name: string;
@@ -168,15 +169,27 @@ export async function registerUser(input: RegisterInput, meta?: AuthRequestMetad
   }
 
   const passwordHash = await bcrypt.hash(input.password, 12);
-  const user = await UserModel.create({
-    name: input.name,
-    username: usernameLower,
-    email: emailLower,
-    phone: normalizedPhone,
-    passwordHash,
-    hasCompletedProfile: true,
-    ...(input.inviteCode ? { pendingInviteCode: input.inviteCode.trim().toLowerCase() } : {})
-  });
+  let user;
+  try {
+    user = await UserModel.create({
+      name: input.name,
+      username: usernameLower,
+      email: emailLower,
+      phone: normalizedPhone,
+      passwordHash,
+      hasCompletedProfile: true,
+      ...(input.inviteCode ? { pendingInviteCode: input.inviteCode.trim().toLowerCase() } : {})
+    });
+  } catch (error) {
+    if (isMongoDuplicateError(error)) {
+      const apiError = duplicateErrorFromMongo(error);
+      return {
+        status: apiError.status,
+        body: { success: false, message: apiError.message, errorCode: apiError.errorCode }
+      };
+    }
+    throw error;
+  }
 
   const code = sixDigitOtp();
   await OtpModel.create({

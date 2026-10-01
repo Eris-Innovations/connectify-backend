@@ -63,15 +63,17 @@ const userSchema = new Schema(
     lastSeenAt: { type: Date },
     /** Opt-in GPS Nearby discovery (default off). */
     nearbyEnabled: { type: Boolean, default: false, index: true },
-    // Omit until Nearby is enabled — empty `{ type: 'Point' }` fails 2dsphere (Mongo 16755).
+    // Only set when Nearby is on with real coords — empty `{ type: 'Point' }` fails 2dsphere (Mongo 16755).
     nearbyLocation: {
-      type: {
-        type: String,
-        enum: ['Point']
-      },
-      coordinates: {
-        type: [Number]
-      }
+      type: new Schema(
+        {
+          type: { type: String, enum: ['Point'], required: true },
+          coordinates: { type: [Number], required: true }
+        },
+        { _id: false }
+      ),
+      required: false,
+      default: undefined
     },
     nearbyUpdatedAt: { type: Date },
     pendingInviteCode: { type: String, default: '' },
@@ -103,6 +105,14 @@ const userSchema = new Schema(
 );
 
 export type UserDocument = InferSchemaType<typeof userSchema> & { _id: string };
+
+userSchema.pre('validate', function stripIncompleteNearbyLocation(next) {
+  const loc = this.get('nearbyLocation') as { type?: string; coordinates?: number[] } | null | undefined;
+  if (!loc || !Array.isArray(loc.coordinates) || loc.coordinates.length !== 2) {
+    this.set('nearbyLocation', undefined);
+  }
+  next();
+});
 
 userSchema.index({ nearbyLocation: '2dsphere' });
 userSchema.index({ nearbyEnabled: 1, nearbyUpdatedAt: -1 });

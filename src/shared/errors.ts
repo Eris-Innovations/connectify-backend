@@ -41,12 +41,24 @@ export function asyncHandler<T extends Request>(
   };
 }
 
-function duplicateError(error: MongoServerError): ApiError {
-  const key = Object.keys((error.keyPattern as Record<string, unknown> | undefined) ?? {})[0] ?? '';
+export function duplicateErrorFromMongo(error: { keyPattern?: Record<string, unknown>; keyValue?: Record<string, unknown>; message?: string }): ApiError {
+  const key =
+    Object.keys(error.keyPattern ?? {})[0] ??
+    Object.keys(error.keyValue ?? {})[0] ??
+    '';
   if (key === 'phone') return new ApiError(409, 'PHONE_ALREADY_REGISTERED', 'This phone number is already registered.');
   if (key === 'email') return new ApiError(409, 'EMAIL_ALREADY_REGISTERED', 'This email is already registered.');
   if (key === 'username') return new ApiError(409, 'USERNAME_ALREADY_TAKEN', 'This username is already taken.');
-  return new ApiError(409, 'DUPLICATE_RECORD', 'This record already exists.');
+  const msg = String(error.message ?? '');
+  if (/phone/i.test(msg)) return new ApiError(409, 'PHONE_ALREADY_REGISTERED', 'This phone number is already registered.');
+  if (/email/i.test(msg)) return new ApiError(409, 'EMAIL_ALREADY_REGISTERED', 'This email is already registered.');
+  if (/username/i.test(msg)) return new ApiError(409, 'USERNAME_ALREADY_TAKEN', 'This username is already taken.');
+  return new ApiError(409, 'ACCOUNT_ALREADY_EXISTS', 'This account information is already in use.');
+}
+
+export function isMongoDuplicateError(error: unknown): error is MongoServerError {
+  if (!error || typeof error !== 'object') return false;
+  return (error as { code?: unknown }).code === 11000;
 }
 
 export const errorHandler: ErrorRequestHandler = (error, _req, res, next) => {
@@ -56,8 +68,8 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, next) => {
 
   if (error instanceof ApiError) {
     apiError = error;
-  } else if (error instanceof MongoServerError && error.code === 11000) {
-    apiError = duplicateError(error);
+  } else if (isMongoDuplicateError(error) || (error instanceof MongoServerError && error.code === 11000)) {
+    apiError = duplicateErrorFromMongo(error as MongoServerError);
   } else if (error?.name === 'MongoServerSelectionError' || error?.name === 'MongooseServerSelectionError') {
     apiError = new ApiError(503, 'DATABASE_UNAVAILABLE', 'The service is temporarily unavailable. Please try again.');
   } else {
