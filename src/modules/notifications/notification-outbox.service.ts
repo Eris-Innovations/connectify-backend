@@ -13,6 +13,7 @@ import {
   sendIncomingCallPush,
   type AndroidPushOutcome,
 } from '../../lib/expoPush';
+import { sendVoipIncomingCallPush } from '../../lib/apnsVoip';
 
 const MAX_ATTEMPTS = 6;
 const PROCESSING_LEASE_MS = 2 * 60_000;
@@ -79,21 +80,22 @@ async function deliver(row: {
   const eventId = row.eventId;
   switch (row.kind) {
     case 'call': {
-      const android = await sendAndroidIncomingCallPush(userId, {
+      const callPayload = {
         callId: String(row.payload.callId),
         callerId: String(row.payload.callerId),
         callerName: String(row.payload.callerName ?? 'Unknown'),
         isVideo: Boolean(row.payload.isVideo),
+      };
+      const voipSent = await sendVoipIncomingCallPush(userId, callPayload);
+      const android = await sendAndroidIncomingCallPush(userId, {
+        ...callPayload,
         eventId,
       });
       let expoDelivered = 0;
       const iosTokens = await getExpoPushTokensForUser(userId, { category: 'call', platform: 'ios' });
       if (iosTokens.length) {
         await sendIncomingCallPush(iosTokens, {
-          callId: String(row.payload.callId),
-          callerId: String(row.payload.callerId),
-          callerName: String(row.payload.callerName ?? 'Unknown'),
-          isVideo: Boolean(row.payload.isVideo),
+          ...callPayload,
           eventId,
         });
         expoDelivered += iosTokens.length;
@@ -106,16 +108,14 @@ async function deliver(row: {
         });
         if (androidExpo.length) {
           await sendIncomingCallPush(androidExpo, {
-            callId: String(row.payload.callId),
-            callerId: String(row.payload.callerId),
-            callerName: String(row.payload.callerName ?? 'Unknown'),
-            isVideo: Boolean(row.payload.isVideo),
+            ...callPayload,
             eventId,
           });
           expoDelivered += androidExpo.length;
         }
       }
-      assertPushDelivered(android, expoDelivered, 'call');
+      // VoIP wake counts as a successful iOS delivery for CallKit.
+      assertPushDelivered(android, expoDelivered + voipSent, 'call');
       return;
     }
     case 'call_cancel': {

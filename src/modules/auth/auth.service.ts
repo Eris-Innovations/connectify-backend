@@ -13,6 +13,8 @@ import { AuthSecurityEventModel } from './security-event.model';
 import { DevicePushTokenModel } from '../users/device-push-token.model';
 import { verifyReferralOnOtp } from '../referrals/referral.service';
 import { duplicateErrorFromMongo, isMongoDuplicateError } from '../../shared/errors';
+import { ConsentRecordModel } from '../compliance/consent-record.model';
+import { CONSENT_PURPOSES, TERMS_OF_SERVICE_POLICY_VERSION } from '../compliance/consent.constants';
 
 type RegisterInput = {
   name: string;
@@ -189,6 +191,16 @@ export async function registerUser(input: RegisterInput, meta?: AuthRequestMetad
       };
     }
     throw error;
+  }
+
+  try {
+    await ConsentRecordModel.create({
+      userId: user._id,
+      purpose: CONSENT_PURPOSES.TERMS_OF_SERVICE,
+      policyVersion: TERMS_OF_SERVICE_POLICY_VERSION
+    });
+  } catch (error) {
+    console.warn('[auth] register: failed to record terms consent', error);
   }
 
   const code = sixDigitOtp();

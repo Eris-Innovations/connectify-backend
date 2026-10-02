@@ -159,7 +159,8 @@ export async function upsertDevicePushTokenController(req: AuthedRequest, res: R
   const platform = req.body?.platform === 'android' || req.body?.platform === 'ios' ? req.body.platform : '';
   const expoToken = typeof req.body?.expoToken === 'string' ? req.body.expoToken.trim() : '';
   const fcmToken = typeof req.body?.fcmToken === 'string' ? req.body.fcmToken.trim() : '';
-  if (!deviceId || deviceId.length > 200 || !platform || (!expoToken && !fcmToken)) {
+  const voipToken = typeof req.body?.voipToken === 'string' ? req.body.voipToken.trim() : '';
+  if (!deviceId || deviceId.length > 200 || !platform || (!expoToken && !fcmToken && !voipToken)) {
     return res.status(StatusCodes.BAD_REQUEST).json({
       success: false,
       message: 'Invalid device registration.',
@@ -172,6 +173,7 @@ export async function upsertDevicePushTokenController(req: AuthedRequest, res: R
   const detachQuery: Record<string, unknown>[] = [];
   if (expoToken) detachQuery.push({ expoToken });
   if (fcmToken) detachQuery.push({ fcmToken });
+  if (voipToken) detachQuery.push({ voipToken });
   if (detachQuery.length > 0) {
     await DevicePushTokenModel.deleteMany({
       userId: { $ne: req.auth!.userId },
@@ -179,20 +181,21 @@ export async function upsertDevicePushTokenController(req: AuthedRequest, res: R
     });
   }
 
+  const setDoc: Record<string, unknown> = {
+    platform,
+    enabled: req.body?.enabled !== false,
+    messageEnabled: req.body?.messageEnabled !== false,
+    callEnabled: req.body?.callEnabled !== false,
+    appVersion: typeof req.body?.appVersion === 'string' ? req.body.appVersion.slice(0, 40) : '',
+    lastSeenAt: new Date()
+  };
+  if (expoToken) setDoc.expoToken = expoToken;
+  if (fcmToken) setDoc.fcmToken = fcmToken;
+  if (voipToken) setDoc.voipToken = voipToken;
+
   const row = await DevicePushTokenModel.findOneAndUpdate(
     { userId: req.auth!.userId, deviceId },
-    {
-      $set: {
-        platform,
-        expoToken,
-        fcmToken,
-        enabled: req.body?.enabled !== false,
-        messageEnabled: req.body?.messageEnabled !== false,
-        callEnabled: req.body?.callEnabled !== false,
-        appVersion: typeof req.body?.appVersion === 'string' ? req.body.appVersion.slice(0, 40) : '',
-        lastSeenAt: new Date()
-      }
-    },
+    { $set: setDoc },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   ).lean();
 

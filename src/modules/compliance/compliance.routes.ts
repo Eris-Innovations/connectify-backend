@@ -14,9 +14,10 @@ import {
   withdrawalPurpose
 } from './consent.constants';
 import { getTranscriptionConsentStatus } from './consent.service';
+import { sendModerationAlertEmail } from '../../lib/email';
 
 export const complianceRouter = Router();
-const REPORTABLE_ENTITY_TYPES = new Set(['message', 'channel', 'user']);
+const REPORTABLE_ENTITY_TYPES = new Set(['message', 'channel', 'user', 'post']);
 
 async function writeAuditLog(input: {
   actorUserId?: string;
@@ -133,7 +134,7 @@ complianceRouter.post('/compliance/reports', requireAuth, async (req: AuthedRequ
   if (!REPORTABLE_ENTITY_TYPES.has(entityType) || !entityId || !reason) {
     return res.status(400).json({
       success: false,
-      message: 'entityType (message/channel/user), entityId, and reason are required'
+      message: 'entityType (message/channel/user/post), entityId, and reason are required'
     });
   }
 
@@ -164,6 +165,15 @@ complianceRouter.post('/compliance/reports', requireAuth, async (req: AuthedRequ
     targetId: entityId,
     region: user?.region ?? 'na',
     metadata: { reportId: String(report._id), reason }
+  });
+
+  void sendModerationAlertEmail({
+    reportId: String(report._id),
+    entityType,
+    entityId,
+    reason,
+    reporterUserId: req.auth!.userId,
+    note: note || undefined
   });
 
   return res.status(201).json({

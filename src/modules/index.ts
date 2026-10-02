@@ -31,6 +31,7 @@ import { normalizePhone, phoneSearchPatterns } from '../lib/phone';
 import { findDmMongoId, ensureDmConversation } from '../lib/dmConversation';
 import { friendsRouter } from './friends/friends.routes';
 import { areFriends } from './friends/friends.service';
+import { getMutualBlockIds, isEitherBlocked } from './users/user-block.service';
 import { callsRouter } from './calls/calls.routes';
 import { telemetryRouter } from './telemetry/telemetry.routes';
 import { connectyRouter } from './connecty/connecty.routes';
@@ -232,8 +233,12 @@ apiRouter.get('/chats', requireAuth, async (req: AuthedRequest, res) => {
       return bTime - aTime;
     });
 
+    const blockedIds = await getMutualBlockIds(userId);
     const visibleChats = [];
     for (const row of formatted) {
+      if (row.peerUserId && blockedIds.has(String(row.peerUserId))) {
+        continue;
+      }
       if (row.peerUserId && !(await areFriends(userId, row.peerUserId))) {
         continue;
       }
@@ -264,6 +269,13 @@ apiRouter.post('/chats', requireAuth, async (req: AuthedRequest, res) => {
   }
   if (String(targetUserId) === req.auth!.userId) {
     return res.status(400).json({ success: false, message: 'Cannot chat with yourself' });
+  }
+
+  if (await isEitherBlocked(req.auth!.userId, String(targetUserId))) {
+    return res.status(403).json({
+      success: false,
+      message: 'You cannot message this user because one of you has blocked the other.'
+    });
   }
 
   const friends = await areFriends(req.auth!.userId, String(targetUserId));

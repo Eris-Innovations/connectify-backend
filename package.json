@@ -24,6 +24,7 @@
     "@opentelemetry/instrumentation-express": "^0.62.0",
     "@opentelemetry/instrumentation-http": "^0.214.0",
     "@opentelemetry/sdk-node": "^0.214.0",
+    "apn": "^2.2.0",
     "axios": "^1.15.0",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",

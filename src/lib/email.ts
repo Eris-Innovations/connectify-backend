@@ -251,3 +251,57 @@ export async function sendReferralInviteEmail(to: string, code: string): Promise
     return { sent: false, reason: 'request_failed', detail };
   }
 }
+
+/** Notify ops that a user reported content or blocked someone (Guideline 1.2). */
+export async function sendModerationAlertEmail(input: {
+  reportId: string;
+  entityType: string;
+  entityId: string;
+  reason: string;
+  reporterUserId: string;
+  note?: string;
+}): Promise<SendEmailResult> {
+  const apiKey = env.RESEND_API_KEY?.trim();
+  const opsTo = (env.MODERATION_ALERT_EMAIL ?? env.EMAIL_FROM ?? '').trim();
+  const toMatch = opsTo.match(/<([^>]+)>/);
+  const to = (toMatch?.[1] ?? opsTo).toLowerCase();
+  if (!apiKey || !to.includes('@')) {
+    console.info('[email] moderation alert (not emailed)', input);
+    return { sent: false, reason: 'not_configured' };
+  }
+
+  const { from, missingDetail } = resolveEmailFrom();
+  if (!from) return { sent: false, reason: 'not_configured', detail: missingDetail };
+
+  const text = [
+    'Connectify safety alert',
+    '',
+    `Report ID: ${input.reportId}`,
+    `Type: ${input.entityType}`,
+    `Entity: ${input.entityId}`,
+    `Reason: ${input.reason}`,
+    `Reporter: ${input.reporterUserId}`,
+    input.note ? `Note: ${input.note}` : '',
+    '',
+    'Please review in the admin Safety inbox within 24 hours.'
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const resend = new Resend(apiKey);
+  try {
+    const { data, error } = await resend.emails.send({
+      from,
+      to,
+      subject: `[Connectify] New ${input.entityType} report — act within 24h`,
+      text
+    });
+    if (error || !data?.id) {
+      return { sent: false, reason: 'request_failed', detail: error?.message ?? 'No message id' };
+    }
+    return { sent: true };
+  } catch (err: unknown) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { sent: false, reason: 'request_failed', detail };
+  }
+}

@@ -3,6 +3,7 @@ import { Types } from 'mongoose';
 import { sortUserPair, ensureDmConversation, purgeDmBetweenUsers } from '../../lib/dmConversation';
 import { resolveStoredMediaUrl } from '../../lib/r2';
 import { UserModel } from '../users/user.model';
+import { getMutualBlockIds, isEitherBlocked } from '../users/user-block.service';
 import { FriendConnectionModel } from './friend-connection.model';
 
 export type FriendRelationship =
@@ -89,6 +90,7 @@ export async function listFriendRequests(userId: string) {
 }
 
 export async function listFriends(userId: string) {
+  const blockedIds = await getMutualBlockIds(userId);
   const rows = await FriendConnectionModel.find({
     status: 'accepted',
     $or: [{ userLow: userId }, { userHigh: userId }]
@@ -101,7 +103,9 @@ export async function listFriends(userId: string) {
     rows.map((row) => {
       const low = String(row.userLow);
       const high = String(row.userHigh);
-      return formatUserSummary(low === userId ? high : low);
+      const peerId = low === userId ? high : low;
+      if (blockedIds.has(peerId)) return Promise.resolve(null);
+      return formatUserSummary(peerId);
     })
   );
   return summaries.filter((user): user is NonNullable<typeof user> => Boolean(user));
@@ -116,6 +120,14 @@ export async function sendFriendRequest(
   }
   if (fromUserId === targetUserId) {
     return { ok: false, status: StatusCodes.BAD_REQUEST, message: 'You cannot add yourself' };
+  }
+
+  if (await isEitherBlocked(fromUserId, targetUserId)) {
+    return {
+      ok: false,
+      status: StatusCodes.FORBIDDEN,
+      message: 'You cannot connect with this user because one of you has blocked the other.'
+    };
   }
 
   const target = await UserModel.findById(targetUserId).select('_id').lean();

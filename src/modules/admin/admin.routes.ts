@@ -16,6 +16,7 @@ import { adminUserChatsList, adminChatMessagesGet } from './user-chats.controlle
 import { clampSearchQuery, escapeMongoRegex } from '../../lib/mongoRegex';
 import { canAdminAccessUser, requireAdminCapability } from './access';
 import { createBroadcastAnnouncement } from './broadcast.service';
+import { ChannelPostModel } from '../channels/channel-post.model';
 import {
   getMemberVoiceActivity,
   getRecentVoiceActivity,
@@ -361,7 +362,20 @@ adminRouter.post('/admin/moderation/reports/:id/action', requireAuth, async (req
       await ChannelModel.findByIdAndDelete(report.entityId);
     }
     if (report.entityType === 'user') {
-      await UserModel.findByIdAndDelete(report.entityId);
+      await UserModel.findByIdAndUpdate(report.entityId, { $set: { isSuspended: true } });
+    }
+    if (report.entityType === 'message' && Types.ObjectId.isValid(report.entityId)) {
+      await MessageModel.findByIdAndUpdate(report.entityId, {
+        $set: {
+          deletedForEveryoneAt: new Date(),
+          deletedBy: new Types.ObjectId(req.auth!.userId),
+          deletedReplacementText: 'This message was removed by Connectify moderation.',
+          'content.text': ''
+        }
+      });
+    }
+    if (report.entityType === 'post' && Types.ObjectId.isValid(report.entityId)) {
+      await ChannelPostModel.findByIdAndDelete(report.entityId);
     }
   }
 

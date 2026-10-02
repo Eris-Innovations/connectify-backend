@@ -7,6 +7,8 @@ const devicePushTokenSchema = new Schema(
     platform: { type: String, enum: ['android', 'ios'], required: true },
     expoToken: { type: String, default: '' },
     fcmToken: { type: String, default: '' },
+    /** iOS PushKit VoIP token (hex). Used for CallKit wake via APNs VoIP topic. */
+    voipToken: { type: String, default: '' },
     enabled: { type: Boolean, default: true },
     messageEnabled: { type: Boolean, default: true },
     callEnabled: { type: Boolean, default: true },
@@ -19,6 +21,7 @@ const devicePushTokenSchema = new Schema(
 devicePushTokenSchema.index({ userId: 1, deviceId: 1 }, { unique: true });
 devicePushTokenSchema.index({ expoToken: 1 }, { sparse: true });
 devicePushTokenSchema.index({ fcmToken: 1 }, { sparse: true });
+devicePushTokenSchema.index({ voipToken: 1 }, { sparse: true });
 
 export type DevicePushTokenDocument = InferSchemaType<typeof devicePushTokenSchema> & { _id: string };
 export const DevicePushTokenModel = model('DevicePushToken', devicePushTokenSchema);

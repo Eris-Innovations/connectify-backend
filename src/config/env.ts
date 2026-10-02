@@ -84,10 +84,25 @@ const envSchema = z.object({
   /** Cloudflare Realtime TURN key id + API token for short-lived ICE credentials. */
   CLOUDFLARE_TURN_KEY_ID: optionalTrimmed('CLOUDFLARE_TURN_KEY_ID'),
   CLOUDFLARE_TURN_API_TOKEN: optionalTrimmed('CLOUDFLARE_TURN_API_TOKEN'),
+  /** Optional inbox for UGC report alerts (falls back to EMAIL_FROM). */
+  MODERATION_ALERT_EMAIL: optionalTrimmedLoose(),
   /** Self-hosted LiveKit SFU (wss://…). Required for production voice/video media. */
   LIVEKIT_URL: optionalTrimmed('LIVEKIT_URL'),
   LIVEKIT_API_KEY: optionalTrimmed('LIVEKIT_API_KEY'),
   LIVEKIT_API_SECRET: optionalTrimmed('LIVEKIT_API_SECRET'),
+  /** Apple Push Notification auth key (.p8 contents) for VoIP pushes. */
+  APNS_KEY_P8: optionalTrimmedLoose(),
+  APNS_KEY_ID: optionalTrimmed('APNS_KEY_ID'),
+  APNS_TEAM_ID: optionalTrimmed('APNS_TEAM_ID'),
+  /** Defaults to com.connectify.mobileapp.voip */
+  APNS_VOIP_TOPIC: optionalTrimmed('APNS_VOIP_TOPIC'),
+  /** Use APNs production gateway (true) or sandbox (false). */
+  APNS_PRODUCTION: z
+    .union([z.string(), z.boolean(), z.undefined()])
+    .transform((v) => {
+      if (v === false || v === 'false' || v === '0') return false;
+      return true;
+    }),
   /** Connecty personal friend chatbot (free LLM stack). */
   CONNECTY_ENABLED: z
     .union([z.string(), z.boolean(), z.undefined()])

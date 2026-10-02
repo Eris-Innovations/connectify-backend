@@ -4,6 +4,7 @@ import { requireAuth, type AuthedRequest } from '../../middleware/auth';
 import { resolveStoredMediaUrl } from '../../lib/r2';
 import { UserModel } from '../users/user.model';
 import { getFriendRelationship } from '../friends/friends.service';
+import { getMutualBlockIds } from '../users/user-block.service';
 import {
   distanceMeters,
   isAllowedNearbyRadius,
@@ -87,8 +88,11 @@ nearbyRouter.get('/nearby', requireAuth, async (req: AuthedRequest, res) => {
     .limit(50)
     .lean();
 
+  const blockedIds = await getMutualBlockIds(userId);
   const data = await Promise.all(
-    rows.map(async (u) => {
+    rows
+      .filter((u) => !blockedIds.has(String(u._id)))
+      .map(async (u) => {
       const coords = u.nearbyLocation?.coordinates;
       const peerLng = Array.isArray(coords) ? Number(coords[0]) : NaN;
       const peerLat = Array.isArray(coords) ? Number(coords[1]) : NaN;
