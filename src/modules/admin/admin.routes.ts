@@ -23,6 +23,7 @@ import {
   mapActivityItemToApiRow,
   resolveMemberUserIds
 } from './admin-transcripts.service';
+import { listNearbyForAdmin } from '../nearby/nearby.admin';
 
 export const adminRouter = Router();
 
@@ -926,4 +927,17 @@ adminRouter.delete('/admin/users/:id', requireAuth, async (req: AuthedRequest, r
     targetId: String(user._id)
   });
   return res.json({ success: true, data: { id: String(user._id) } });
+});
+
+adminRouter.get('/admin/nearby', requireAuth, async (req: AuthedRequest, res) => {
+  const actor = await requireAdminCapability(req, res, 'user_management');
+  if (!actor) return;
+
+  try {
+    const people = await listNearbyForAdmin(actor);
+    return res.json({ success: true, data: people });
+  } catch (error) {
+    console.error('Failed to list nearby locations for admin', error);
+    return res.status(500).json({ success: false, message: 'Could not load Nearby locations.' });
+  }
 });
