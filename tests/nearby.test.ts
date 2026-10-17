@@ -5,6 +5,8 @@ import { env } from '../src/config/env';
 import {
   distanceMeters,
   isAllowedNearbyRadius,
+  isNearbyFresh,
+  NEARBY_ADMIN_FRESH_MS,
   NEARBY_ALLOWED_RADII_M,
   nearbyStaleCutoff,
   NEARBY_STALE_MS,
@@ -31,6 +33,13 @@ describe('nearby shared helpers', () => {
       new Date(now - NEARBY_STALE_MS).toISOString()
     );
   });
+
+  it('treats admin map locations as fresh only inside the 5-minute window', () => {
+    const now = Date.now();
+    expect(isNearbyFresh(new Date(now - 60_000), now)).toBe(true);
+    expect(isNearbyFresh(new Date(now - NEARBY_ADMIN_FRESH_MS - 1), now)).toBe(false);
+    expect(isNearbyFresh(null, now)).toBe(false);
+  });
 });
 describe('nearby HTTP auth gates', () => {
   const app = createApp();
@@ -44,5 +53,9 @@ describe('nearby HTTP auth gates', () => {
       (await request(app).get(`${env.API_PREFIX}/nearby`).query({ lat: 31.52, lng: 74.35, radius: 500 }))
         .status
     ).toBe(401);
+  });
+
+  it('requires auth for admin nearby locations', async () => {
+    expect((await request(app).get(`${env.API_PREFIX}/admin/nearby`)).status).toBe(401);
   });
 });

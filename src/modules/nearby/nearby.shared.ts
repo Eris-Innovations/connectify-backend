@@ -6,6 +6,9 @@ const ALLOWED = new Set<number>(NEARBY_ALLOWED_RADII_M);
 /** Drops stale presence so users who left Nearby stop appearing. Background pings are sparse. */
 export const NEARBY_STALE_MS = 30 * 60 * 1000;
 
+/** Admin map “fresh” badge — independent of peer-discovery stale window. */
+export const NEARBY_ADMIN_FRESH_MS = 5 * 60 * 1000;
+
 export function isAllowedNearbyRadius(radiusM: number): radiusM is NearbyRadiusM {
   return ALLOWED.has(radiusM);
 }
@@ -22,6 +25,13 @@ export function isValidLatLng(lat: number, lng: number): boolean {
 
 export function nearbyStaleCutoff(now = Date.now()): Date {
   return new Date(now - NEARBY_STALE_MS);
+}
+
+export function isNearbyFresh(updatedAt: Date | string | null | undefined, now = Date.now()): boolean {
+  if (!updatedAt) return false;
+  const time = new Date(updatedAt).getTime();
+  if (!Number.isFinite(time)) return false;
+  return now - time <= NEARBY_ADMIN_FRESH_MS && time <= now + 60_000;
 }
 
 /** Haversine distance in meters. */
